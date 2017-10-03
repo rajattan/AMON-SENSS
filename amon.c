@@ -2,14 +2,25 @@
 //================================================================================//
 /*
  *
- * AMON Copyright 2016 The Regents of The University of Michigan
- *
- * Authors  - Michalis Kallitsis <mgkallit@merit.edu>
+ * (C) 2015 - Michalis Kallitsis <mgkallit@merit.edu>
  *            Stilian Stoev <sstoev@umich.edu>
- *            Rajat Tandon <rajattan@merit.edu>
+ *            George Michailidis <gmichail@ufl.edu>
+ *            Modified by Jelena Mirkovic <sunshine@isi.edu>
  *
- * Licensed under the GNU Lesser General Public License, version 3. You may
- * obtain a copy of the license at https://www.gnu.org/licenses/gpl-3.0.html
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU LESSER GENERAL PUBLIC LICENSE
+ * published by the Free Software Foundation; either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software Foundation,
+ * Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
+ * 
  */
 //================================================================================//
 //================================================================================//
@@ -38,6 +49,7 @@
 #include <monetary.h>
 #include <locale.h>
 #include <pcap.h>
+#include <regex.h>
 
 #include "pfring.h"
 #include "pfutils.c"
@@ -50,6 +62,22 @@
 #define MAXLEN 128
 #define CONFIG_FILE "amon.config"
 #define VERBOSE_SUPPORT
+#define MAX_LINE 255
+#define INTERVAL 3
+#define TCP 6
+#define UDP 17
+#define BUF_SIZE 1000
+
+struct flow_p
+{
+  long time;
+  int len;
+  flow_t flow;
+};
+long buf_time = 0;
+int buf_cnt = 0;
+int buf_i = 0;
+struct flow_p buffer[BUF_SIZE];
 
 pfring *pd[MAX_NUM_DEVS];
 struct pollfd pfd[MAX_NUM_DEVS];
@@ -67,8 +95,9 @@ int poll_duration = DEFAULT_POLL_DURATION;
 //=======================================//
 //==== Declare AMON-related variables====//
 //=======================================//
-pthread_mutex_t critical_section_lock;
-u_int8_t modality_type;
+
+u_int8_t modality_type;            /* 0 for bytes, 1 for packets, 2 for 
+				      outstanding connections */
 
 unsigned int *P_bm;
 unsigned int *P_bm_r;
@@ -81,6 +110,9 @@ flow_t *cand_tmp;	            /* tmp array used for swapping the above pointers 
 long *count;		            /* array of counters */
 long *count_r;		            /* helper array for reading counts */
 long *count_tmp;	            /* tmp array used for swapping the above pointers */
+int isready;
+long curTime = 0;
+long dbTime = 0;
 
 //unsigned int *major_flags;	    /* flag indicating whether majority exists */
 //unsigned int *major_flags_r;	    /* (helper for reading) flag indicating whether majority exists */
@@ -91,6 +123,10 @@ unsigned int *databrick_r;	    /* (helper for reading) databrick array */
 unsigned int *databrick_tmp;	    /* (tmp for swapping)  databrick array */
 
 pthread_mutex_t critical_section_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Make sure we don't fire if data is not ready */
+pthread_mutex_t time_sync_lock = PTHREAD_MUTEX_INITIALIZER;
+
 flow_t pqueue[HEAPSIZE];            /* Heap data structure (priority queue)*/
 struct nlist *hashtab[HASHSIZE];    /* Hash table associated with the priority queue*/
 
@@ -288,6 +324,7 @@ export_to_db (unsigned int *databrick_r, /*unsigned int *major_flags_r,*/
   child = bson_new ();
   bson_oid_init (&oid, NULL);
   BSON_APPEND_OID (doc, "_id", &oid);
+  // Jelena, this should change to time of data
   bson_append_date_time (doc, "timestamp", -1, (long) (time (NULL) * 1000));
   bson_append_array_begin (doc, "data", -1, child);
   for (int i = 0; i < BRICK_DIMENSION * BRICK_DIMENSION; i++)
@@ -379,7 +416,8 @@ print_stats ()
   double thpt;
   int i = 0;
   unsigned long long absolute_recv = 0, absolute_drop = 0;
-
+  
+  printf("\n Inside print stats function \n");
   if (startTime.tv_sec == 0)
     {
       gettimeofday (&startTime, NULL);
@@ -473,6 +511,7 @@ sigproc (int sig)
   for (i = 0; i < num_devs; i++)
     pfring_close (pd[i]);
 
+  fprintf(stderr, "In sigproc\n");
   exit (0);
 }
 
@@ -571,53 +610,108 @@ intoa (unsigned int addr)
 
 /*****************************************************************/
 void
-amonProcessing (struct pfring_pkthdr *h, const u_char * p)
+amonProcessing(flow_t flow, int len, long time)
 {
+  // Just insert data into buffer
+  if (buf_i == BUF_SIZE-1)
+    {
+      amonReprocess();
+      printf("buftime %ld count %d\n", buf_time, buf_cnt);
+      buf_i = 0;
+      buf_cnt = 0;
+      buf_time = 0;
+    }
+  struct flow_p flp = {time, len, flow};
+  buffer[buf_i].time = time;
+  buffer[buf_i].len = len;
+  buffer[buf_i].flow = flow;
+  buf_i++;
+  if (buf_time == 0)
+    {
+      buf_time = time;
+      buf_cnt = 1;
+    }
+  else if (buf_time != time)
+    {
+      buf_cnt--;
+      if (buf_cnt == 0)
+	{
+	  buf_time = time;
+	  buf_cnt = 1;
+	}
+    }
+  else
+    buf_cnt++;
+}
 
-  struct ether_header ehdr;
-  u_short eth_type, vlan_id;
-  struct ip ip;
+void amonReprocess()
+{
   u_int16_t thin_s = 0, hash_j = 0;	    /* indices for the Boyer-Moore algorithm */
   int s_bucket = 0, d_bucket = 0;	    /* indices for the databrick */
-  flow_t flow = {0,0,0,0};
   u_int32_t displ = 0;
-  u_int32_t src_omega;		            /* The SRC IP in its integer representation */
-  u_int32_t dst_omega;		            /* The DST IP in its integer representation */
   int error;
   unsigned int payload;
   u_int32_t IP_prefix = 0;
 
-  memcpy (&ehdr, p, sizeof (struct ether_header));
-  eth_type = ntohs (ehdr.ether_type);
-
-  if (eth_type == 0x8100)
+  if ((error = pthread_mutex_lock (&time_sync_lock)))
     {
-      vlan_id = (p[14] & 15) * 256 + p[15];
-      eth_type = (p[16]) * 256 + p[17];
-      displ += 4;
-      p += 4;
+      fprintf (stderr,
+	       "Error Number %d For Acquiring Lock. FATAL ERROR. \n",
+	       error);
+      exit (-1);
     }
-
-  if (eth_type == 0x0800)
+  
+  for (int i=0; i<BUF_SIZE;i++)
     {
-      memcpy (&ip, p + sizeof (ehdr),sizeof (struct ip));        
-      src_omega = ntohl (ip.ip_src.s_addr);
-      dst_omega = ntohl (ip.ip_dst.s_addr);
+      flow_t flow = buffer[i].flow;
+      long time = buffer[i].time;
+      int len = buffer[i].len;
+      if (time != buf_time)                 /* ignore flows that are not in the current time slot */	
+	continue;
+      curTime = buf_time;
+      if (dbTime == 0)
+	dbTime = buf_time;
+      // If data is very much out of order we may have
+      // a "crippled" second. That is fine since we add
+      // data to databricks in database
+      if (curTime - dbTime >= INTERVAL)
+	{
+	  if (isready == 0)
+	    {
+	      int diff = curTime - dbTime;
+	      printf("Ready to process time %ld curtime %ld diff %d\n", time, curTime, diff);
+	      isready = 1;
+	    }
+	  else if(isready == 2)
+	    {
+	      isready = 0;
+	      int diff = curTime - dbTime;
+	      dbTime = curTime;
+	      printf("Ready and done, lastTime is now %ld curTime %ld diff %d\n", dbTime, curTime, diff);
+	    }
+	}
+      if ((error = pthread_mutex_unlock (&time_sync_lock)))
+	{
+	  fprintf (stderr,
+		   "Error Number %d For Releasing Lock. FATAL ERROR. \n",
+		   error);
+	  exit (-1);
+	}
 
-      IP_prefix = src_omega >> 15;
+      IP_prefix = flow.src >> 15;
       s_bucket = STRATA_IDX17_prefix_bin[IP_prefix];
       if (s_bucket == -1)
-	  s_bucket = IDX17[Table16 (src_omega, T1_16, T2_16, T3_17)];
-
-      IP_prefix = dst_omega >> 15;
+	s_bucket = IDX17[Table16 (flow.src, T1_16, T2_16, T3_17)];
+      
+      IP_prefix = flow.dst >> 15;
       d_bucket = STRATA_IDX17_prefix_bin[IP_prefix];
       if (d_bucket == -1)
-	  d_bucket = IDX17[Table16 (dst_omega, T1_16, T2_16, T3_17)];
-
+	d_bucket = IDX17[Table16 (flow.dst, T1_16, T2_16, T3_17)];
+      
       /* Populate sketch array! */
       thin_s = s_bucket * BRICK_DIMENSION + d_bucket;	        /* this is the sub-stream s */
-      hash_j = Table16 (src_omega, T1_16, T2_16, T3_17) >> 9;	/* hashing entries of substream s even more */
-
+      hash_j = Table16 (flow.src, T1_16, T2_16, T3_17) >> 9;	/* hashing entries of substream s even more */
+      
       /* Entering Critical Section    */
       if ((error = pthread_mutex_lock (&critical_section_lock)))
 	{
@@ -626,30 +720,11 @@ amonProcessing (struct pfring_pkthdr *h, const u_char * p)
 		   error);
 	  exit (-1);
 	}
-
-      pfring_parse_pkt((u_char*)p, (struct pfring_pkthdr*)h, 4, 0, 0);
-      if(h->extended_hdr.parsed_pkt.l4_src_port == 0 && h->extended_hdr.parsed_pkt.l4_dst_port == 0)
-      {
-        memset((void*)&h->extended_hdr.parsed_pkt, 0, sizeof(struct pkt_parsing_info));
-        pfring_parse_pkt((u_char*)p, (struct pfring_pkthdr*)h, 4, 0, 0);
-      }
-
-	#if 0
-      		printf ("[%s:%d ", intoa (ntohl (ip.ip_src.s_addr)),
-              	h->extended_hdr.parsed_pkt.l4_src_port);
-      		printf ("-> %s:%d] \n", intoa (ntohl (ip.ip_dst.s_addr)),
-              	h->extended_hdr.parsed_pkt.l4_dst_port);
-	#endif
-
-
-       payload = (modality_type == 0) ? h->len : 1;
-       databrick[s_bucket * BRICK_DIMENSION + d_bucket] += payload;	// add bytes
-
-       flow.src = src_omega;
-       flow.dst = dst_omega;
-       flow.sport = h->extended_hdr.parsed_pkt.l4_src_port;
-       flow.dport = h->extended_hdr.parsed_pkt.l4_dst_port;
-
+      
+      // len may be bytes or outstanding connections
+      payload = ((modality_type == 0) || (modality_type == 2)) ? len : 1;
+      databrick[s_bucket * BRICK_DIMENSION + d_bucket] += payload;	// add bytes
+      
       if (cand[thin_s].src == 0)
 	{
 	  cand[thin_s] = flow;
@@ -694,10 +769,155 @@ amonProcessing (struct pfring_pkthdr *h, const u_char * p)
 	}
       /* Exiting Critical Section    */
       asm volatile ("":::"memory");
+    }
+}
 
+
+void
+amonProcessingNfdump (char* line, long time)
+{
+  /* 2|1453485557|768|1453485557|768|6|0|0|0|2379511808|44694|0|0|0|2792759296|995|0|0|0|0|2|0|1|40 */
+  // Get start and end time of a flow
+  char* tokene;
+  strtok(line,"|");
+  char* token = strtok(NULL,"|");
+  long start = strtol(token, &tokene, 10);
+  strtok(NULL,"|");
+  token = strtok(NULL,"|");
+  long end = strtol(token, &tokene, 10);
+  int dur = end - start;
+  // Normalize duration
+  if (dur < 0)
+    dur = 0;
+  if (dur > 3600)
+    dur = 3600;
+  int pkts, bytes;
+
+  /* Get source and destination IP and port and protocol */
+  flow_t flow = {0,0,0,0};
+  int proto = atoi(strtok(NULL,"|"));
+  for (int i=0; i<3; i++)
+    strtok(NULL,"|");
+  token=strtok(NULL, "|"); // src
+  flow.src = strtol(token, &tokene, 10);
+  token=strtok(NULL,"|");
+  flow.sport = atoi(token); // sport
+  for (int i=0; i<3; i++)
+    strtok(NULL,"|");
+  token=strtok(NULL, "|"); // dst
+  flow.dst = strtol(token, &tokene, 10);
+  token=strtok(NULL,"|");
+  flow.dport = atoi(token); // dport
+  for (int i=0; i<4; i++)
+    strtok(NULL,"|");
+  token=strtok(NULL, "|"); // flags
+  int flags = atoi(token);
+  token=strtok(NULL, "|"); 
+  token=strtok(NULL, "|"); // pkts
+  pkts = atoi(token);
+  token=strtok(NULL, "|"); //bytes
+  bytes = atoi(token);
+  bytes = (int)(bytes/(dur+1))+1;
+
+  /* Is this outstanding connection? For TCP, connections without 
+     PUSH are outstanding. For UDP, connections that have a request
+     but not a reply are outstanding. Because bidirectional flows
+     may be broken into two unidirectional flows we have values of
+     0, -1 and +1 for outstanding connection indicator or oci. For 
+     TCP we use 0 (there is a PUSH) or 1 (no PUSH) and for UDP/ICMP we 
+     use +1 for requests and -1 for replies. */
+  int oci;
+  if (proto == TCP)
+    {
+      // There is a PUSH flag
+      if (flags & 16 > 0)
+	oci = 0;
+      else
+	oci = 1;
+    }
+  else if (proto == UDP)
+    {
+      // Quick and dirty check if this is request
+      // or reply
+      // reply
+      if (flow.sport < 1024 && flow.dport >= 1024)
+	oci = -1;
+      // request
+      else if (flow.sport >= 1024 && flow.dport < 1024)
+	oci = 1;
+      // unknown, assume request
+      else
+	oci = 1;
+    }
+  else
+    // unknown, assume request
+    // we could fix this for ICMP trafic if type.code
+    // is correct in data
+    oci=1;
+  if (modality_type == 2)
+    bytes = oci;
+  amonProcessing(flow, bytes, end);
+}
+
+void
+amonProcessingPcap (struct pfring_pkthdr *h, const u_char * p, long time)
+{
+
+  struct ether_header ehdr;
+  u_short eth_type, vlan_id;
+  struct ip ip;
+  u_int16_t thin_s = 0, hash_j = 0;	    /* indices for the Boyer-Moore algorithm */
+  int s_bucket = 0, d_bucket = 0;	    /* indices for the databrick */
+  flow_t flow = {0,0,0,0};
+  u_int32_t displ = 0;
+  u_int32_t src_omega;		            /* The SRC IP in its integer representation */
+  u_int32_t dst_omega;		            /* The DST IP in its integer representation */
+  int error, len = 0;
+  unsigned int payload;
+  u_int32_t IP_prefix = 0;
+
+  memcpy (&ehdr, p, sizeof (struct ether_header));
+  eth_type = ntohs (ehdr.ether_type);
+
+  if (eth_type == 0x8100)
+    {
+      vlan_id = (p[14] & 15) * 256 + p[15];
+      eth_type = (p[16]) * 256 + p[17];
+      displ += 4;
+      p += 4;
     }
 
+  if (eth_type == 0x0800)
+    {
+      memcpy (&ip, p + sizeof (ehdr),sizeof (struct ip));        
+      src_omega = ntohl (ip.ip_src.s_addr);
+      dst_omega = ntohl (ip.ip_dst.s_addr);
+      /* Find out ports */
+      
+      pfring_parse_pkt((u_char*)p, (struct pfring_pkthdr*)h, 4, 0, 0);
+      if(h->extended_hdr.parsed_pkt.l4_src_port == 0 && h->extended_hdr.parsed_pkt.l4_dst_port == 0)
+      {
+        memset((void*)&h->extended_hdr.parsed_pkt, 0, sizeof(struct pkt_parsing_info));
+        pfring_parse_pkt((u_char*)p, (struct pfring_pkthdr*)h, 4, 0, 0);
+      }
+	#if 0
+      		printf ("[%s:%d %d", intoa (ntohl (ip.ip_src.s_addr)),
+              	h->extended_hdr.parsed_pkt.l4_src_port, s_bucket);
+      		printf ("-> %s:%d] \n", intoa (ntohl (ip.ip_dst.s_addr)),
+              	h->extended_hdr.parsed_pkt.l4_dst_port);
+	#endif
+
+
+      flow.src = src_omega;
+      flow.dst = dst_omega;
+      flow.sport = h->extended_hdr.parsed_pkt.l4_src_port;
+      flow.dport = h->extended_hdr.parsed_pkt.l4_dst_port;
+      len = h->len;
+
+      amonProcessing(flow, len, time);
+    }
 }
+
 
 /***********************************************************************/
 void *
@@ -738,46 +958,76 @@ reset_transmit (void *passed_params)
 
   while (1)
     {
-      sleep (3);
-      asm volatile ("":::"memory");
-      printf ("=====================================================\n");
-      fprintf (stderr, "Report from reset_transmit Thread\n");
-      /*      Entering Critical Section     */
-      if ((error = pthread_mutex_lock (&critical_section_lock)))
+      usleep(100);
+      if ((error = pthread_mutex_lock (&time_sync_lock)))
 	{
 	  fprintf (stderr,
 		   "Error Number %d For Acquiring Lock. FATAL ERROR. \n",
 		   error);
 	  exit (-1);
 	}
-
-      P_bm_tmp = (unsigned int *) P_bm;
-      P_bm = (unsigned int *) P_bm_r;
-      P_bm_r = (unsigned int *) P_bm_tmp;
-
-      cand_tmp = (flow_t *) cand;
-      cand = (flow_t *) cand_r;
-      cand_r = (flow_t *) cand_tmp;
-
-      count_tmp = (long *) count;
-      count = (long *) count_r;
-      count_r = (long *) count_tmp;
-
-      /*major_flags_tmp = (unsigned int *) major_flags;
-      major_flags = (unsigned int *) major_flags_r;
-      major_flags_r = (unsigned int *) major_flags_tmp;*/
-
-      databrick_tmp = (unsigned int *) databrick;
-      databrick = (unsigned int *) databrick_r;
-      databrick_r = (unsigned int *) databrick_tmp;
-
-      if ((error = pthread_mutex_unlock (&critical_section_lock)))
+      /* Check if data is ready */
+      if (!isready)
 	{
-	  fprintf (stderr,
-		   "Error Number %d For Releasing Lock. FATAL ERROR. \n",
-		   error);
-	  exit (-1);
-	}			/*      Exiting Critical Section     */
+	  if ((error = pthread_mutex_unlock (&time_sync_lock)))
+	    {
+	      fprintf (stderr,
+		       "Error Number %d For Releasing Lock. FATAL ERROR. \n",
+		       error);
+	      exit (-1);
+	    }			/*      Exiting Critical Section     */
+	}
+      else
+	{
+	  isready = 2;   /* signal that we have started processing what is there */
+	  printf("Current databrick %d\n", databrick[4476]);
+	  fflush(stdout);
+	  asm volatile ("":::"memory");
+	  printf ("======current==========%ld===%d=====================\n", dbTime, databrick[4476]);
+	  /*      Entering Critical Section     */
+	  if ((error = pthread_mutex_lock (&critical_section_lock)))
+	    {
+	      fprintf (stderr,
+		       "Error Number %d For Acquiring Lock. FATAL ERROR. \n",
+		       error);
+	      exit (-1);
+	    }
+	  
+	  P_bm_tmp = (unsigned int *) P_bm;
+	  P_bm = (unsigned int *) P_bm_r;
+	  P_bm_r = (unsigned int *) P_bm_tmp;
+	  
+	  cand_tmp = (flow_t *) cand;
+	  cand = (flow_t *) cand_r;
+	  cand_r = (flow_t *) cand_tmp;
+	  
+	  count_tmp = (long *) count;
+	  count = (long *) count_r;
+	  count_r = (long *) count_tmp;
+	  
+	  /*major_flags_tmp = (unsigned int *) major_flags;
+	    major_flags = (unsigned int *) major_flags_r;
+	    major_flags_r = (unsigned int *) major_flags_tmp;*/
+	  
+	  databrick_tmp = (unsigned int *) databrick;
+	  databrick = (unsigned int *) databrick_r;
+	  databrick_r = (unsigned int *) databrick_tmp;
+	  
+	  if ((error = pthread_mutex_unlock (&critical_section_lock)))
+	    {
+	      fprintf (stderr,
+		       "Error Number %d For Releasing Lock. FATAL ERROR. \n",
+		       error);
+	      exit (-1);
+	    }			/*      Exiting Critical Section     */
+
+	  if ((error = pthread_mutex_unlock (&time_sync_lock)))
+	    {
+	      fprintf (stderr,
+		       "Error Number %d For Releasing Lock. FATAL ERROR. \n",
+		       error);
+	      exit (-1);
+	    }			/*      Exiting Critical Section     */
 
 
       /* Find the culprit */
@@ -836,20 +1086,27 @@ reset_transmit (void *passed_params)
 	      fprintf (stderr, "Buffer Overflow. FATAL ERROR.\n");
 	      exit (-1);
 	    }
+	  /*
 	  if (modality_type == 0)
 	      fprintf (stderr, "Hitter Flow #%d: [%s] -> [%s]: %s bytes.\n\n",
 		     k + 1, hitter_src_str, hitter_dst_str,
 		     pfring_format_numbers ((double) hashtab_read (hitter),
 					    buf, sizeof (buf), 0));
-	  else
+	  else if (modality_type == 1)
 	      fprintf (stderr, "Hitter Flow #%d: [%s] -> [%s]: %s packets.\n\n",
 		     k + 1, hitter_src_str, hitter_dst_str,
 		     pfring_format_numbers ((double) hashtab_read (hitter),
 					    buf, sizeof (buf), 0));
+	  else
+	      fprintf (stderr, "Hitter Flow #%d: [%s] -> [%s]: %s outstanding connections.\n\n",
+		     k + 1, hitter_src_str, hitter_dst_str,
+		     pfring_format_numbers ((double) hashtab_read (hitter),
+					    buf, sizeof (buf), 0));
+	  */
 	}
 
       /* Transmit databrick to MongoDB - centralized monitoring station */
-      export_to_db (databrick_r,/* major_flags_r,*/ cand_r);
+      //export_to_db (databrick_r,/* major_flags_r,*/ cand_r);
       /* End of mongodb part - this should go into a function */
 
       /* Reset pqueue and its hash table and get ready for new iteration */
@@ -875,8 +1132,8 @@ reset_transmit (void *passed_params)
       memset ((unsigned int *) databrick_r, 0,
 	      (BRICK_DIMENSION * BRICK_DIMENSION) * sizeof (unsigned int));
       printf ("=====================================================\n");
+	}
     }
-
   pthread_exit (NULL);
 }
 
@@ -895,7 +1152,7 @@ printHelp (void)
   printf ("amon\n(C) 2015  Merit Network, Inc.\n\n");
   printf ("-h              Print this help\n");
   printf
-    ("-r <inputfile>  Input PCAP file; besides -f option, all other options ignored\n");
+    ("-r <inputfile>  Input PCAP, nfdump or flow-tools file; besides -f option, all other options ignored\n");
   printf ("-i <devices>    Comma-separated list of devices: ethX,ethY\n");
   printf ("-l <len>        Capture length\n");
   printf ("-g <core_id>    Bind to a core\n");
@@ -903,6 +1160,8 @@ printHelp (void)
   printf ("-p <poll wait>  Poll wait (msec)\n");
   printf ("-b <cpu %%>      CPU pergentage priority (0-99)\n");
   printf ("-s              Use poll instead of active wait\n");
+  printf ("-m              Modality type, 0 for bytes, 1 for\n");
+  printf ("                packets, 2 for outstanding conns\n");
 #ifdef VERBOSE_SUPPORT
   printf ("-v              Verbose\n");
 #endif
@@ -946,7 +1205,7 @@ packetConsumer ()
 	  if (pfring_recv
 	      (pd[next], &buffer, 0, &hdr, 0 /* wait_for_packet */ ) > 0)
 	    {
-	      amonProcessing (&hdr, buffer);
+	      amonProcessingPcap(&hdr, buffer, time(0));
 	      numPkts++;
 	      numBytes += hdr.len + 24 /* 8 Preamble + 4 CRC + 12 IFG */ ;
 	    }
@@ -987,13 +1246,14 @@ main (int argc, char *argv[])
   char *bpfFilter = NULL;
   char *pcap_in = NULL;
   struct bpf_program fcode;
+  int ispcap = 0; /* Flag telling us the file format, pcap or nfdump/flow-tools */
 
   startTime.tv_sec = 0;
 #ifdef VERBOSE_SUPPORT
   thiszone = gmt_to_local (0);
 #endif
 
-  while ((c = getopt (argc, argv, "hi:l:vsw:p:b:g:f:r:")) != '?')
+  while ((c = getopt (argc, argv, "hi:l:vsw:p:b:g:f:m:r:")) != '?')
     {
       if ((c == 255) || (c == -1))
 	break;
@@ -1006,6 +1266,7 @@ main (int argc, char *argv[])
 	  break;
 	case 'r':
 	  pcap_in = strdup (optarg);
+	  printf("Pcap in is %s\n", pcap_in);
 	  break;
 	case 's':
 	  wait_for_packet = 1;
@@ -1018,6 +1279,9 @@ main (int argc, char *argv[])
 	  break;
 	case 'f':
 	  bpfFilter = strdup (optarg);
+	  break;
+	case 'm':
+	  modality_type = atoi(optarg);
 	  break;
 #ifdef VERBOSE_SUPPORT
 	case 'v':
@@ -1149,20 +1413,61 @@ main (int argc, char *argv[])
   memset ((unsigned int *) databrick_r, 0,
 	  BRICK_DIMENSION * BRICK_DIMENSION * sizeof (unsigned int));
 
+  /* Data is not ready for reading */
+  isready = 0;
+  
   /* libpcap functionality follows */
   if (pcap_in)
     {
       char ebuf[256];
       u_char *p;
       struct pcap_pkthdr *h;
-      pcap_t *pt = pcap_open_offline (pcap_in, ebuf);
+      /* This is going to be a pointer to input
+	 stream, either from PCAP or nfdump or flow-tools */
+      pcap_t *pt;
+      FILE* nf;
+      
       unsigned long long num_pcap_pkts = 0;
       struct timeval beginning = { 0, 0 };
       struct pfring_pkthdr hdr;
       memset (&hdr, 0, sizeof (hdr));
 
+      pt = pcap_open_offline (pcap_in, ebuf);
       if (pt)
+	ispcap = 1;
+      else
 	{
+	  ispcap = 0;
+	  char cmd[300];
+	  sprintf(cmd,"nfdump -r %s -o pipe 2>/dev/null", pcap_in);
+	  nf = popen(cmd, "r");
+	  /* Close immediately so we get the error code 
+	     and we can detect if this is maybe flow-tools format */
+	  int error = pclose(nf);
+	  if (error == 64000)
+	    {
+	      //sprintf(cmd,"ft2nfdump -r %s | nfdump -r - -o 'fmt:%%ts %%te %%pr %%sap -> %%dap %%flg %%pkt %%byt %%fl'", pcap_in);
+	      sprintf(cmd,"ft2nfdump -r %s | nfdump -r - -o pipe", pcap_in);
+	      nf = popen(cmd, "r");
+	    }
+	  else
+	    {
+	      nf = popen(cmd, "r");
+	    }
+	  if (!nf)
+	    {
+	      fprintf(stderr,"Cannot open file %s for reading. Unknown format.\n", pcap_in);
+	      exit(1);
+	    }
+	  else
+	    {
+	      /* Remove first line, it is the header */
+	      char line[MAX_LINE];
+	      fgets(line, MAX_LINE, nf);
+	    }
+	}
+    if (ispcap)
+    {
 	  int datalink = pcap_datalink (pt);
 
 	  if (datalink != DLT_EN10MB)
@@ -1183,37 +1488,79 @@ main (int argc, char *argv[])
 		    }
 		}
 	    }
+    }
+    else
+      {
+	/* Filter with nfdump, so far this is unsupported */
+      }
+    /* Ready to start the reset and transmit helper thread */
+    int retstatus =
+      pthread_create (&thread_id, NULL, reset_transmit, NULL);
+    if (retstatus)
+      {
+	printf ("ERROR; return code from pthread_create() is %d\n",
+		retstatus);
+	exit (-1);
+      }
 
-	  /* Ready to start the reset and transmit helper thread */
-	  int retstatus =
-	    pthread_create (&thread_id, NULL, reset_transmit, NULL);
-	  if (retstatus)
-	    {
-	      printf ("ERROR; return code from pthread_create() is %d\n",
-		      retstatus);
-	      exit (-1);
-	    }
+    if (ispcap)
+      {
+	while (1)
+	  {
+	    int rc = pcap_next_ex (pt, &h, (const u_char **) &p);
+	    
+	    if (rc <= 0)
+	      break;
+	    
+	    if (num_pcap_pkts == 0)
+	      {
+		curTime = h->ts.tv_sec;
+		curTime = 0;
+		beginning.tv_sec = h->ts.tv_sec;
+		beginning.tv_usec = h->ts.tv_usec;
+		printf ("First packet seen at %ld\n",
+			beginning.tv_sec * 1L);
+	      }
+	    num_pcap_pkts++;
+	    
+	    memcpy (&hdr, h, sizeof (struct pcap_pkthdr));
+	    amonProcessingPcap(&hdr, p, h->ts.tv_sec);
+	  }
+      }
+    else
+      {
+	char line[MAX_LINE];
+	while (fgets(line, MAX_LINE, nf) != NULL)
+	  {
+	    // Check that this is the line with a flow
+	    regex_t regex;
+	    int reti;
+	    char msgbuf[100];
 
-	  while (1)
-	    {
-	      int rc = pcap_next_ex (pt, &h, (const u_char **) &p);
-
-	      if (rc <= 0)
-		break;
-
-	      if (num_pcap_pkts == 0)
-		{
-		  beginning.tv_sec = h->ts.tv_sec;
-		  beginning.tv_usec = h->ts.tv_usec;
-		  printf ("First packet seen at %ld\n",
-			  beginning.tv_sec * 1L);
-		}
-	      num_pcap_pkts++;
-
-	      memcpy (&hdr, h, sizeof (struct pcap_pkthdr));
-	      amonProcessing (&hdr, p);
-	    }
-	}
+	    char tmpline[255];
+	    strcpy(tmpline, line);
+	    if (strstr(tmpline, "|") == NULL)
+	      continue;
+	    strtok(tmpline,"|");
+	    strtok(NULL,"|");
+	    strtok(NULL,"|");
+	    char* tokene;
+	    char* token = strtok(NULL, "|");
+	    long epoch = strtol(token, &tokene, 10);
+	    token = strtok(NULL, "|");
+	    int msec = atoi(token);
+	    if (num_pcap_pkts == 0)
+	      {
+		curTime = epoch;
+		beginning.tv_sec = epoch;
+		beginning.tv_usec = msec*1000;
+		printf ("First packet seen at %ld\n",
+			beginning.tv_sec * 1L);
+	      }
+	    num_pcap_pkts++;
+	    amonProcessingNfdump(line, epoch);
+	  }
+      }
 
       free(mem);
       free(mem2);
@@ -1225,7 +1572,7 @@ main (int argc, char *argv[])
       //free(mem8);
       free(mem9);
       free(mem10);
-
+      printf("Done with the file\n");
       return 0;			// Exit program
     }
 
@@ -1243,8 +1590,8 @@ main (int argc, char *argv[])
   while (i < MAX_NUM_DEVS && dev != NULL)
     {
       flags |= PF_RING_PROMISC;
-      flags |= PF_RING_DNA_SYMMETRIC_RSS;	/* Note that symmetric RSS is ignored by non-DNA drivers */
-#if 0				/* TODO This will be needed when we require the port info */
+      flags |= PF_RING_DNA_SYMMETRIC_RSS;
+#if 0			
       flags |= PF_RING_LONG_HEADER;
 #endif
       pd[i] = pfring_open (dev, snaplen, flags);
@@ -1315,7 +1662,6 @@ main (int argc, char *argv[])
   if (bind_core >= 0)
     bind2core (bind_core);
 
-  /* Ready to start the reset and transmit helper thread */
   retstatus = pthread_create (&thread_id, NULL, reset_transmit, NULL);
   if (retstatus)
     {
