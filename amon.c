@@ -111,8 +111,8 @@ long *count;		            /* array of counters */
 long *count_r;		            /* helper array for reading counts */
 long *count_tmp;	            /* tmp array used for swapping the above pointers */
 int isready;
-long curTime = 0;
 long dbTime = 0;
+long curTime = 0;
 
 //unsigned int *major_flags;	    /* flag indicating whether majority exists */
 //unsigned int *major_flags_r;	    /* (helper for reading) flag indicating whether majority exists */
@@ -286,7 +286,7 @@ parse_config (struct conf_param * parms)
 //==========================================================//
 //===== Export Databricks and Boyer Moore Output to DB =====//
 //==========================================================//
-
+/* Rajat change to take long time */
 void
 export_to_db (unsigned int *databrick_r, /*unsigned int *major_flags_r,*/
 	      flow_t * cand_r)
@@ -324,7 +324,7 @@ export_to_db (unsigned int *databrick_r, /*unsigned int *major_flags_r,*/
   child = bson_new ();
   bson_oid_init (&oid, NULL);
   BSON_APPEND_OID (doc, "_id", &oid);
-  // Jelena, this should change to time of data
+  /* Rajat, change to use time we sent into the function instead of current */
   bson_append_date_time (doc, "timestamp", -1, (long) (time (NULL) * 1000));
   bson_append_array_begin (doc, "data", -1, child);
   for (int i = 0; i < BRICK_DIMENSION * BRICK_DIMENSION; i++)
@@ -616,12 +616,10 @@ amonProcessing(flow_t flow, int len, long time)
   if (buf_i == BUF_SIZE-1)
     {
       amonReprocess();
-      printf("buftime %ld count %d\n", buf_time, buf_cnt);
       buf_i = 0;
       buf_cnt = 0;
       buf_time = 0;
     }
-  struct flow_p flp = {time, len, flow};
   buffer[buf_i].time = time;
   buffer[buf_i].len = len;
   buffer[buf_i].flow = flow;
@@ -795,6 +793,7 @@ amonProcessingNfdump (char* line, long time)
 
   /* Get source and destination IP and port and protocol */
   flow_t flow = {0,0,0,0};
+  strtok(NULL,"|");
   int proto = atoi(strtok(NULL,"|"));
   for (int i=0; i<3; i++)
     strtok(NULL,"|");
@@ -856,6 +855,7 @@ amonProcessingNfdump (char* line, long time)
     oci=1;
   if (modality_type == 2)
     bytes = oci;
+  
   amonProcessing(flow, bytes, end);
 }
 
@@ -980,10 +980,9 @@ reset_transmit (void *passed_params)
       else
 	{
 	  isready = 2;   /* signal that we have started processing what is there */
-	  printf("Current databrick %d\n", databrick[4476]);
-	  fflush(stdout);
+	  long mongoTime = dbTime;
 	  asm volatile ("":::"memory");
-	  printf ("======current==========%ld===%d=====================\n", dbTime, databrick[4476]);
+	  printf ("===============%ld======================\n", dbTime);
 	  /*      Entering Critical Section     */
 	  if ((error = pthread_mutex_lock (&critical_section_lock)))
 	    {
@@ -1046,25 +1045,20 @@ reset_transmit (void *passed_params)
       /* Insert all candidates and their values into our heap (pqueue) */
       heapsize = 0;
       active_streams = 0;
-      //majority_pop = 0;
       for (i = 0; i < BRICK_DIMENSION * BRICK_DIMENSION; i++)
 	{
 	  if (cand_r[i].src > 0)
 	    {
 	      active_streams++;
 	      max_heap_insert (pqueue, cand_r[i], P_est[i], &heapsize);
-	      //if (major_flags_r[i] > 0)
-		//majority_pop++;
 	    }
 	}
-
-      /*fprintf (stderr,
-	       "A fraction of [%.2f] of substreams includes a majority element\n",
-	       (float) majority_pop / active_streams);*/
       /* Display the top-K heavy-hitters */
+      	  printf("Came here %ld\n", active_streams);
       for (k = 0; k < (active_streams > K ? K : active_streams); k++)
 	{
-	  hitter = heap_extract_max (pqueue, &heapsize);	// hitter here is u_int64_t 
+	  hitter = heap_extract_max (pqueue, &heapsize);	// hitter here is u_int64_t
+
 	  if (hitter.src == 0)
 	    {
 	      fprintf (stderr, "We got a zero candidate key. FATAL ERROR.\n");
@@ -1086,7 +1080,7 @@ reset_transmit (void *passed_params)
 	      fprintf (stderr, "Buffer Overflow. FATAL ERROR.\n");
 	      exit (-1);
 	    }
-	  /*
+
 	  if (modality_type == 0)
 	      fprintf (stderr, "Hitter Flow #%d: [%s] -> [%s]: %s bytes.\n\n",
 		     k + 1, hitter_src_str, hitter_dst_str,
@@ -1102,10 +1096,10 @@ reset_transmit (void *passed_params)
 		     k + 1, hitter_src_str, hitter_dst_str,
 		     pfring_format_numbers ((double) hashtab_read (hitter),
 					    buf, sizeof (buf), 0));
-	  */
 	}
 
       /* Transmit databrick to MongoDB - centralized monitoring station */
+      /* Rajat, here we should send the mongoTime too, to the function. */
       //export_to_db (databrick_r,/* major_flags_r,*/ cand_r);
       /* End of mongodb part - this should go into a function */
 
@@ -1515,7 +1509,7 @@ main (int argc, char *argv[])
 	    if (num_pcap_pkts == 0)
 	      {
 		curTime = h->ts.tv_sec;
-		curTime = 0;
+		dbTime = 0;
 		beginning.tv_sec = h->ts.tv_sec;
 		beginning.tv_usec = h->ts.tv_usec;
 		printf ("First packet seen at %ld\n",
