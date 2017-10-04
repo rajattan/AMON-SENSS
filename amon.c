@@ -325,6 +325,11 @@ export_to_db (unsigned int *databrick_r, /*unsigned int *major_flags_r,*/
   bson_oid_init (&oid, NULL);
   BSON_APPEND_OID (doc, "_id", &oid);
   /* Rajat, change to use time we sent into the function instead of current */
+  /* Also change to first pull from DB data about that timestamp. If data
+     is present then add current databrick to it and update. If not present, then
+     you can do what the code currently does (insert). I think we can just insert
+     current candidates to the old ones. There'll be more than the fixed number there is
+     now but that's fine. */
   bson_append_date_time (doc, "timestamp", -1, (long) (time (NULL) * 1000));
   bson_append_array_begin (doc, "data", -1, child);
   for (int i = 0; i < BRICK_DIMENSION * BRICK_DIMENSION; i++)
