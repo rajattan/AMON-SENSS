@@ -78,7 +78,6 @@ long buf_time = 0;
 int buf_cnt = 0;
 int buf_i = 0;
 struct flow_p buffer[BUF_SIZE];
-
 pfring *pd[MAX_NUM_DEVS];
 struct pollfd pfd[MAX_NUM_DEVS];
 int num_devs = 0;
@@ -348,6 +347,14 @@ export_to_db (unsigned int *databrick_r, /*unsigned int *major_flags_r,*/
   mongoc_cursor_t *cursor;
 
 
+      if (( pthread_mutex_lock (&critical_section_lock)))
+        {
+          fprintf (stderr,
+                   "Error Number  For Releasing Lock. FATAL ERROR");
+          exit (-1);
+        }
+
+
 
 
   mongoc_init ();
@@ -367,12 +374,11 @@ export_to_db (unsigned int *databrick_r, /*unsigned int *major_flags_r,*/
      now but that's fine. */
 
   query = bson_new ();
-  bson_append_date_time(query,"timestamp",100,timestamp);
+  bson_append_date_time(query,"timestamp",-1,timestamp);
   cursor = mongoc_collection_find(collection, MONGOC_QUERY_NONE, 0, 0, 0, query, NULL, NULL);
 
 
      while (mongoc_cursor_next (cursor, &doc1)) {
-
       		update_flag = 1;
       		str = bson_as_json (doc1, NULL);
       		ptr = strstr(str,"\"data\"");
@@ -394,11 +400,22 @@ export_to_db (unsigned int *databrick_r, /*unsigned int *major_flags_r,*/
 
       if(update_flag == 1)
       {
+          /*printf("\n Remove Timestamp %ld \n",timestamp);
+              FILE *log = NULL;
+    		log = fopen("./output", "a");
+    		if (log == NULL)
+    		{
+        		printf("Error! can't open log file.");
+    		}
+
+    		fprintf(log, "\nRemove %ld\n", timestamp);
+    		fclose(log);
+           */
           if (!mongoc_collection_remove (collection, MONGOC_REMOVE_SINGLE_REMOVE, query, NULL, &error))
  	  {
             fprintf (stderr, "Delete failed: %s\n", error.message);
           }
-
+       bson_destroy (query);
       } 
 
   doc = bson_new ();
@@ -484,6 +501,16 @@ export_to_db (unsigned int *databrick_r, /*unsigned int *major_flags_r,*/
   mongoc_collection_destroy (collection);
   mongoc_client_destroy (client);
   mongoc_cleanup ();
+      if ((pthread_mutex_unlock (&critical_section_lock)))
+        {
+          fprintf (stderr,
+                   "Error Number For Releasing Lock. FATAL ERROR. \n");
+          exit (-1);
+        }
+      /* Exiting Critical Section    */
+      asm volatile ("":::"memory");
+
+
 
 
 }
@@ -1046,7 +1073,7 @@ reset_transmit (void *passed_params)
 
   while (1)
     {
-      usleep(100);
+      usleep(1000);
       if ((error = pthread_mutex_lock (&time_sync_lock)))
 	{
 	  fprintf (stderr,
@@ -1189,7 +1216,7 @@ reset_transmit (void *passed_params)
 
 
 
-
+/*
       FILE *log = NULL;
     log = fopen("./output", "a");
     if (log == NULL)
@@ -1200,10 +1227,12 @@ reset_transmit (void *passed_params)
 
     fprintf(log, "%ld\n", mongoTime);
     fclose(log);
+  */     
+
 
       /* Transmit databrick to MongoDB - centralized monitoring station */
       /* Rajat, here we should send the mongoTime too, to the function. */
-      export_to_db (databrick_r,/* major_flags_r,*/ cand_r,mongoTime);
+      export_to_db (databrick_r,/* major_flags_r,*/ cand_r, mongoTime*1000);
       /* End of mongodb part - this should go into a function */
 
       /* Reset pqueue and its hash table and get ready for new iteration */
@@ -1670,6 +1699,9 @@ main (int argc, char *argv[])
       free(mem9);
       free(mem10);
       printf("Done with the file\n");
+
+
+
       return 0;			// Exit program
     }
 
