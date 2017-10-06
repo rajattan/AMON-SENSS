@@ -27,7 +27,7 @@ INCLUDE    =  -I${MONGODIR} -I${BSONDIR}
 #
 # CROSS_COMPILE=arm-mv5sft-linux-gnueabi-
 #-std=gnu9
-CC         = ${CROSS_COMPILE}gcc #--platform=native
+CC         = ${CROSS_COMPILE}gcc -g #--platform=native 
 CFLAGS     =  ${O_FLAG} -Wall -std=gnu99 ${INCLUDE} ${DNA_DEFINE} -D HAVE_ZERO -D ENABLE_BPF -D HAVE_LIBNUMA -D HAVE_PTHREAD_SETAFFINITY_NP -O2  -L${MONGOLIBDIR}# -g
 # LDFLAGS  =
 

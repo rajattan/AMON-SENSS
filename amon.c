@@ -122,6 +122,12 @@ unsigned int *databrick;	    /* databrick array */
 unsigned int *databrick_r;	    /* (helper for reading) databrick array */
 unsigned int *databrick_tmp;	    /* (tmp for swapping)  databrick array */
 
+long *timestamp;
+long *timestamp_r;
+long *timestamp_tmp;
+
+
+
 pthread_mutex_t critical_section_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* Make sure we don't fire if data is not ready */
@@ -282,6 +288,29 @@ parse_config (struct conf_param * parms)
 
   fclose (fp);
 }
+//=====================================================================//
+//===== Function to parse databrick string to convert into number =====//
+//=====================================================================//
+
+long *string_to_long_array(char *input, long *level)
+{
+    char *cp = strtok(input, ", ");
+    if (cp == NULL) {
+        return (long *) malloc(sizeof(long) * *level);
+    }
+
+    long my_index = -1;
+    long n;
+    if (sscanf(cp, "%ld", &n) == 1) {
+        my_index = *level;
+        *level += 1;
+    }
+    long *array = string_to_long_array(NULL, level);
+    if (my_index >= 0) {
+        array[my_index] = n;
+    }
+    return array;
+}
 
 //==========================================================//
 //===== Export Databricks and Boyer Moore Output to DB =====//
@@ -289,7 +318,7 @@ parse_config (struct conf_param * parms)
 /* Rajat change to take long time */
 void
 export_to_db (unsigned int *databrick_r, /*unsigned int *major_flags_r,*/
-	      flow_t * cand_r)
+	      flow_t * cand_r,long timestamp)
 {
   /*Transmit databrick to MongoDB - centralized monitoring station */
   mongoc_client_t *client;
@@ -297,21 +326,32 @@ export_to_db (unsigned int *databrick_r, /*unsigned int *major_flags_r,*/
   bson_error_t error;
   bson_oid_t oid;
   bson_t *doc;
+  const bson_t *doc1;
   bson_t *child;
-  char key[10];
+  char key[15];
   int num;
   bson_t *child_utf8;
-  char tooltip_buffer[40];
+  char tooltip_buffer[2000];
   flow_t hitter = {0,0,0,0};
   u_int32_t hitter_src = 0;
   u_int32_t hitter_dst = 0;
   struct in_addr in_src;
   struct in_addr in_dst;
-  char hitter_src_str[20];
-  char hitter_dst_str[20];
+  char hitter_src_str[1000];
+  char hitter_dst_str[1000];
+  int update_flag = 0;
+  bson_t *query =   BSON_INITIALIZER;
+  char *str,*ptr,*token;
+  char *search = "]";
+  long n_array = 0;
+  long *array;
+  mongoc_cursor_t *cursor;
+
+
+
 
   mongoc_init ();
-  client = mongoc_client_new (parms.mongo_db_client);	/* sending to database */
+  client = mongoc_client_new (parms.mongo_db_client);
   collection = mongoc_client_get_collection (client,parms.database, parms.db_collection);
   if (!collection)
     {
@@ -319,18 +359,53 @@ export_to_db (unsigned int *databrick_r, /*unsigned int *major_flags_r,*/
 	       "mongoc_client_get_collection FAILED - skipping and will try again later.\n");
       return;
     }
-
-  doc = bson_new ();
-  child = bson_new ();
-  bson_oid_init (&oid, NULL);
-  BSON_APPEND_OID (doc, "_id", &oid);
   /* Rajat, change to use time we sent into the function instead of current */
   /* Also change to first pull from DB data about that timestamp. If data
      is present then add current databrick to it and update. If not present, then
      you can do what the code currently does (insert). I think we can just insert
      current candidates to the old ones. There'll be more than the fixed number there is
      now but that's fine. */
-  bson_append_date_time (doc, "timestamp", -1, (long) (time (NULL) * 1000));
+
+  query = bson_new ();
+  bson_append_date_time(query,"timestamp",100,timestamp);
+  cursor = mongoc_collection_find(collection, MONGOC_QUERY_NONE, 0, 0, 0, query, NULL, NULL);
+
+
+     while (mongoc_cursor_next (cursor, &doc1)) {
+
+      		update_flag = 1;
+      		str = bson_as_json (doc1, NULL);
+      		ptr = strstr(str,"\"data\"");
+                ptr = strstr(ptr,"[");
+                token = strtok(ptr, search);
+                array = string_to_long_array(token, &n_array);
+                for(int i=0; i < BRICK_DIMENSION * BRICK_DIMENSION; i++)
+                {
+                  databrick_r[i] = databrick_r[i] + (unsigned int)array[i];
+               }
+
+                free(array);
+
+      }
+
+//mongoc_cursor_destroy (cursor);
+//bson_destroy (query);
+
+
+      if(update_flag == 1)
+      {
+          if (!mongoc_collection_remove (collection, MONGOC_REMOVE_SINGLE_REMOVE, query, NULL, &error))
+ 	  {
+            fprintf (stderr, "Delete failed: %s\n", error.message);
+          }
+
+      } 
+
+  doc = bson_new ();
+  child = bson_new ();
+  bson_oid_init (&oid, NULL);
+  BSON_APPEND_OID (doc, "_id", &oid);
+  bson_append_date_time (doc, "timestamp", -1, timestamp);
   bson_append_array_begin (doc, "data", -1, child);
   for (int i = 0; i < BRICK_DIMENSION * BRICK_DIMENSION; i++)
     {
@@ -342,15 +417,19 @@ export_to_db (unsigned int *databrick_r, /*unsigned int *major_flags_r,*/
 	}
       bson_append_int64 (child, key, -1, databrick_r[i]);
     }
-
   bson_append_array_end (doc, child);
+
+
+
+
+
   child_utf8 = bson_new ();
   bson_append_array_begin (doc, "hitters", -1, child_utf8);
 
   for (int i = 0; i < BRICK_DIMENSION * BRICK_DIMENSION; i++)
     {
       sprintf (key, "%d", i);
-      if (/*major_flags_r[i] > 0 &&*/ cand_r[i].src > 0)
+      if ( cand_r[i].src > 0)
 	{
 
 	  hitter = cand_r[i];	// hitter here is u_int64_t
@@ -385,6 +464,7 @@ export_to_db (unsigned int *databrick_r, /*unsigned int *major_flags_r,*/
     }
   bson_append_array_end (doc, child_utf8);
 
+
   if (!mongoc_collection_insert
       (collection, MONGOC_INSERT_NONE, doc, NULL, &error))
     {
@@ -398,10 +478,14 @@ export_to_db (unsigned int *databrick_r, /*unsigned int *major_flags_r,*/
     }
 
   bson_destroy (doc);
+//  bson_destroy (doc1);
   bson_destroy (child);
   bson_destroy (child_utf8);
   mongoc_collection_destroy (collection);
   mongoc_client_destroy (client);
+  mongoc_cleanup ();
+
+
 }
 /******************************************************************/
 
@@ -727,7 +811,6 @@ void amonReprocess()
       // len may be bytes or outstanding connections
       payload = ((modality_type == 0) || (modality_type == 2)) ? len : 1;
       databrick[s_bucket * BRICK_DIMENSION + d_bucket] += payload;	// add bytes
-      
       if (cand[thin_s].src == 0)
 	{
 	  cand[thin_s] = flow;
@@ -1102,10 +1185,25 @@ reset_transmit (void *passed_params)
 		     pfring_format_numbers ((double) hashtab_read (hitter),
 					    buf, sizeof (buf), 0));
 	}
+       printf("\n Timestamp %ld \n",mongoTime);
+
+
+
+
+      FILE *log = NULL;
+    log = fopen("./output", "a");
+    if (log == NULL)
+    {
+        printf("Error! can't open log file.");
+        return -1;
+    }
+
+    fprintf(log, "%ld\n", mongoTime);
+    fclose(log);
 
       /* Transmit databrick to MongoDB - centralized monitoring station */
       /* Rajat, here we should send the mongoTime too, to the function. */
-      //export_to_db (databrick_r,/* major_flags_r,*/ cand_r);
+      export_to_db (databrick_r,/* major_flags_r,*/ cand_r,mongoTime);
       /* End of mongodb part - this should go into a function */
 
       /* Reset pqueue and its hash table and get ready for new iteration */
