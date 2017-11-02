@@ -27,7 +27,7 @@ INCLUDE    =  -I${MONGODIR} -I${BSONDIR}
 #
 # CROSS_COMPILE=arm-mv5sft-linux-gnueabi-
 #-std=gnu9
-CC         = ${CROSS_COMPILE}gcc -g #--platform=native 
+CC         = ${CROSS_COMPILE}g++ -g #--platform=native 
 CFLAGS     =  ${O_FLAG} -Wall -std=gnu99 ${INCLUDE} ${DNA_DEFINE} -D HAVE_ZERO -D ENABLE_BPF -D HAVE_LIBNUMA -D HAVE_PTHREAD_SETAFFINITY_NP -O2  -L${MONGOLIBDIR}# -g
 # LDFLAGS  =
 
@@ -44,7 +44,7 @@ LIBS       = -lpcap -lpthread -lpfring  -lrt   -lnuma -lrt -lmongoc-1.0 -lbson-1
 #
 # Main targets
 #
-PFPROGS   = amon
+PFPROGS   = amon amon-red
 
 TARGETS   = ${PFPROGS} 
 
@@ -52,6 +52,9 @@ all: ${TARGETS}
 
 amon:  bm_structs.o amon.o 
 	${CC} ${CFLAGS} amon.o  bm_structs.o ${LIBS} -o $@
+
+amon:  bm_structs.o amon-red.o 
+	${CC} ${CFLAGS} amon-red.o ${LIBS} -o $@
 
 clean:
 	@rm -f ${TARGETS} *.o *~
