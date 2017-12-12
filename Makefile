@@ -33,7 +33,7 @@ CFLAGS     =  ${O_FLAG} -Wall -std=gnu99 ${INCLUDE} ${DNA_DEFINE} -D HAVE_ZERO -
 #
 # User and System libraries
 #
-LIBS       = -lpcap -lpthread -lpfring  -lrt   -lnuma -lrt -lmongoc-1.0 -lbson-1.0 -lcrypto -lssl
+LIBS       = -lpcap -lpthread -lpfring  -lrt   -lnuma -lrt -lmongoc-1.0 -lbson-1.0 -lcrypto -lssl -lmysqlcppconn
 
 # How to make an object file
 %.o: %.cc 
@@ -43,11 +43,17 @@ LIBS       = -lpcap -lpthread -lpfring  -lrt   -lnuma -lrt -lmongoc-1.0 -lbson-1
 #
 # Main targets
 #
-PFPROGS   = amon-red
+PFPROGS   = amon-red read detect
 
 TARGETS   = ${PFPROGS} 
 
 all: ${TARGETS}
+
+read: read.o
+	${CC} ${CFLAGS} read.o ${LIBS} -o $@
+
+detect: detect.o
+	${CC} ${CFLAGS} detect.o ${LIBS} -o $@
 
 amon:  bm_structs.o amon.o 
 	${CC} ${CFLAGS} amon.o  bm_structs.o ${LIBS} -o $@

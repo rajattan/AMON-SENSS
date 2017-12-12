@@ -27,6 +27,7 @@
 
 
 #include <signal.h>
+#include <iostream>
 #include <sched.h>
 #include <stdlib.h>
 #include <sys/types.h>
@@ -51,28 +52,50 @@
 #include <pcap.h>
 #include <regex.h>
 #include <iostream>
+#include <sstream>
 #include <string>
+
+#include "mysql_connection.h"
+
+#include <cppconn/driver.h>
+#include <cppconn/exception.h>
+#include <cppconn/resultset.h>
+#include <cppconn/statement.h>
+#include <cppconn/prepared_statement.h>
+#include <streambuf>
 
 #include "pfring.h"
 #include "pfutils.c"
 #include "haship.h"
 #include "haship.c"
 #include "bm_structs.h"
-#include <bson.h>
-#include <mongoc.h>
 #include <openssl/sha.h>
+
 #define MAX_NUM_DEVS 64
 #define MAXLEN 128
 #define CONFIG_FILE "amon.config"
 #define VERBOSE_SUPPORT
 #define MAX_LINE 255
-#define INTERVAL 3
 #define TCP 6
 #define UDP 17
 #define BUF_SIZE 1000
 #define AR_LEN 30
 
 int* delimiters;
+sql::Connection *con;
+sql::Statement *stmt;
+sql::ResultSet *res;
+int interval=3;
+
+using namespace std;
+
+class DataBuf : public streambuf
+{
+public:
+  DataBuf(char * d, size_t s) {
+    setg(d, d, d + s);
+  }
+};
 
 void parse(char* input, char delimiter, int** array)
 {
@@ -94,6 +117,7 @@ struct flow_p
 {
   long time;
   int len;
+  int oci;
   flow_t flow;
 };
 long buf_time = 0;
@@ -128,7 +152,7 @@ flow_t *cand;		            /* array of candidate keys */
 flow_t *cand_r;		            /* helper array for reading candidate keys */
 flow_t *cand_tmp;	            /* tmp array used for swapping the above pointers */
 
-long *count;		            /* array of counters */
+long *count_d;		            /* array of counters */
 long *count_r;		            /* helper array for reading counts */
 long *count_tmp;	            /* tmp array used for swapping the above pointers */
 int isready;
@@ -139,15 +163,8 @@ long curTime = 0;
 //unsigned int *major_flags_r;	    /* (helper for reading) flag indicating whether majority exists */
 //unsigned int *major_flags_tmp;	    /* (tmp for swapping)  flag indicating whether majority exists */
 
-unsigned int *databrick;	    /* databrick array */
-unsigned int *databrick_r;	    /* (helper for reading) databrick array */
-unsigned int *databrick_tmp;	    /* (tmp for swapping)  databrick array */
-
-long *timestamp;
-long *timestamp_r;
-long *timestamp_tmp;
-
-
+unsigned int *databrick_p;	    /* databrick arrays - payload */
+int *databrick_s;	            /* databrick arrays - symmetry */
 
 pthread_mutex_t critical_section_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -163,26 +180,20 @@ struct passingThreadParams
         int callee_id;
 };
 
-u_int32_t T1_16[65536];
-u_int32_t T2_16[65536];
-u_int32_t T3_17[131072];	     /*2^17-long array */
-int IDX[Low14];
-int IDX17[131072];		     /*2^17-long array */
-int STRATA_IDX17_prefix_bin[131072]; /*2^17-long array */
-int seed = 134;
 
 struct conf_param {
 
-        int alarm_sleep;
-        int default_snaplen;
-        char default_device[MAXLEN];
-        char mongo_db_client[MAXLEN];
-        char database[MAXLEN];
-        char db_collection[MAXLEN];
-        int seed;
-        char strata_file[MAXLEN];
-        char prefix_file[MAXLEN];
-
+  int alarm_sleep;
+  int default_snaplen;
+  char default_device[MAXLEN];
+  char user[MAXLEN];
+  char pass[MAXLEN];
+  char db_client[MAXLEN];
+  char database[MAXLEN];
+  char db_collection[MAXLEN];
+  int seed;
+  char strata_file[MAXLEN];
+  char prefix_file[MAXLEN];
 }
 conf_param;
 struct conf_param parms;
@@ -277,9 +288,17 @@ parse_config (struct conf_param * parms)
         {
           strncpy (parms->default_device, value, MAXLEN);
         }
-        else if ( strcasecmp(name, "mongo_db_client")==0)
+        else if ( strcasecmp(name, "mongo_db_client")==0 ||  strcasecmp(name, "db_client")==0)
         {
-          strncpy (parms->mongo_db_client, value, MAXLEN);
+          strncpy (parms->db_client, value, MAXLEN);
+        }
+	else if ( strcasecmp(name, "user")==0)
+        {
+          strncpy (parms->user, value, MAXLEN);
+        }
+	else if ( strcasecmp(name, "pass")==0)
+        {
+          strncpy (parms->pass, value, MAXLEN);
         }
         else if ( strcasecmp(name, "database")==0)
         {
@@ -309,6 +328,7 @@ parse_config (struct conf_param * parms)
 
   fclose (fp);
 }
+
 //=====================================================================//
 //===== Function to parse databrick string to convert into number =====//
 //=====================================================================//
@@ -334,13 +354,86 @@ long *string_to_long_array(char *input, long *level)
 }
 
 //==========================================================//
-//===== Export Databricks and Boyer Moore Output to DB =====//
+//=================== Export Databricks to DB ==============//
 //==========================================================//
-/* Rajat change to take long time */
 void
-export_to_db (unsigned int *databrick_r, /*unsigned int *major_flags_r,*/
-	      flow_t * cand_r,long timestamp)
+export_to_db (unsigned int *databrick_p, int *databrick_s, long timestamp)
 {
+  // First check if there's any data to read and add to
+  sql::Statement *stmt = con->createStatement();
+  char query[256];
+ 
+  sprintf(query, "SELECT * from records where timestamp=%ld",timestamp);
+ 
+  sql::ResultSet* rset = stmt->executeQuery(query);
+  int n = rset->rowsCount();
+  if (n > 0)
+    {
+      // Read old data and add to it, then update
+      while (rset->next()) {
+	/* Access column data by alias or column name */
+	char* token;
+	string out = rset->getString("volume");
+	unsigned int* outp = (unsigned int*) out.c_str();
+	for (int i=0;i<BRICK_DIMENSION*BRICK_DIMENSION;i++)
+	  databrick_p[i] += outp[i];
+	out = rset->getString("symmetry");
+	int* outs = (int*) out.c_str();
+	for (int i=0;i<BRICK_DIMENSION*BRICK_DIMENSION;i++)
+	  databrick_s[i] += outs[i];
+      }
+      try
+	{
+	  sql::PreparedStatement *pstmt;
+	  pstmt = con->prepareStatement("UPDATE records set volume=?, symmetry=? where timestamp=?");
+	  pstmt->setUInt(3, timestamp);
+	  unsigned char* pChars = (unsigned char*) databrick_p;
+	  DataBuf pbuf((char*)pChars, BRICK_DIMENSION*BRICK_DIMENSION*sizeof(unsigned int));
+	  istream pstream(&pbuf);
+	  pstmt->setBlob(1,&pstream);
+	  pChars = (unsigned char*) databrick_s;
+	  DataBuf sbuf((char*)pChars, BRICK_DIMENSION*BRICK_DIMENSION*sizeof(int));
+	  istream sstream(&sbuf);
+	  pstmt->setBlob(2,&sstream);
+	  bool res = pstmt->execute();
+	  pstmt->close();
+	  delete pstmt;
+	} catch (sql::SQLException &e) {
+	cout << "# ERR: SQLException in " << __FILE__;
+	cout << "# ERR: " << e.what();
+	cout << " (MySQL error code: " << e.getErrorCode();
+	cout << ", SQLState: " << e.getSQLState() << " )\n";
+      }
+    }
+  else
+    {
+      try
+	{
+	  sql::PreparedStatement *pstmt;
+	  pstmt = con->prepareStatement("INSERT into records (timestamp,volume,symmetry) values (?,?,?)");
+	  pstmt->setUInt(1, timestamp);
+	  cout << " TIMESTAMP " << timestamp << endl;
+	  unsigned char* pChars = (unsigned char*) databrick_p;
+	  DataBuf pbuf((char*)pChars, BRICK_DIMENSION*BRICK_DIMENSION*sizeof(unsigned int));
+	  istream pstream(&pbuf);
+	  pstmt->setBlob(2,&pstream);
+	  pChars = (unsigned char*) databrick_s;
+	  DataBuf sbuf((char*)pChars, BRICK_DIMENSION*BRICK_DIMENSION*sizeof(int));
+	  istream sstream(&sbuf);
+	  pstmt->setBlob(3,&sstream);
+	  bool res = pstmt->execute();
+	  pstmt->close();
+	  delete pstmt;
+	} catch (sql::SQLException &e) {
+	cout << "# ERR: SQLException in " << __FILE__;
+	cout << "# ERR: " << e.what();
+	cout << " (MySQL error code: " << e.getErrorCode();
+	cout << ", SQLState: " << e.getSQLState() << " )\n";
+      }
+    }
+  stmt->close();
+  delete rset;
+  delete stmt;
 }
 
 /******************************************************************/
@@ -475,7 +568,7 @@ my_sigalarm (int sig)
 
 /************************************************************************/
 
-static char hex[] = "0123456789ABCDEF";
+static char hexc[] = "0123456789ABCDEF";
 
 char *
 etheraddr_string (const u_char * ep, char *buf)
@@ -485,21 +578,21 @@ etheraddr_string (const u_char * ep, char *buf)
 
   cp = buf;
   if ((j = *ep >> 4) != 0)
-    *cp++ = hex[j];
+    *cp++ = hexc[j];
   else
     *cp++ = '0';
 
-  *cp++ = hex[*ep++ & 0xf];
+  *cp++ = hexc[*ep++ & 0xf];
 
   for (i = 5; (int) --i >= 0;)
     {
       *cp++ = ':';
       if ((j = *ep >> 4) != 0)
-	*cp++ = hex[j];
+	*cp++ = hexc[j];
       else
 	*cp++ = '0';
 
-      *cp++ = hex[*ep++ & 0xf];
+      *cp++ = hexc[*ep++ & 0xf];
     }
 
   *cp = '\0';
@@ -588,6 +681,7 @@ void amonReprocess()
       flow_t flow = buffer[i].flow;
       long time = buffer[i].time;
       int len = buffer[i].len;
+      int oci = buffer[i].oci;
       if (time != buf_time)                 /* ignore flows that are not in the current time slot */	
 	continue;
       curTime = buf_time;
@@ -596,7 +690,7 @@ void amonReprocess()
       // If data is very much out of order we may have
       // a "crippled" second. That is fine since we add
       // data to databricks in database
-      if (curTime - dbTime >= INTERVAL)
+      if (curTime - dbTime >= interval)
 	{
 	  if (isready == 0)
 	    {
@@ -615,16 +709,28 @@ void amonReprocess()
       s_bucket = hash(flow.src); /* Jelena: should add  & mask */
       d_bucket = hash(flow.dst); /* Jelena: should add  & mask */
 
-      // len may be bytes or outstanding connections
-      payload = ((modality_type == 0) || (modality_type == 2)) ? len : 1;
-
-      
-      databrick[s_bucket * BRICK_DIMENSION + d_bucket] += payload;	// add bytes
+      int error;
+      if ((error = pthread_mutex_lock (&critical_section_lock)))
+	{
+	  fprintf (stderr,
+		   "Error Number %d For Acquiring Lock. FATAL ERROR. \n",
+		   error);
+	  exit (-1);
+	}
+      databrick_p[s_bucket * BRICK_DIMENSION + d_bucket] += len;	// add bytes to payload databrick
+      databrick_s[s_bucket * BRICK_DIMENSION + d_bucket] += oci;	// add oci to symmetry databrick
+      if ((error = pthread_mutex_unlock (&critical_section_lock)))
+	{
+	  fprintf (stderr,
+		   "Error Number %d For Releasing Lock. FATAL ERROR. \n",
+		   error);
+	  exit (-1);
+	}			/*      Exiting Critical Section     */
     }
 }
 
 void
-amonProcessing(flow_t flow, int len, long time)
+amonProcessing(flow_t flow, int len, long time, int oci)
 {
   // Just insert data into buffer
   if (buf_i == BUF_SIZE-1)
@@ -636,6 +742,7 @@ amonProcessing(flow_t flow, int len, long time)
     }
   buffer[buf_i].time = time;
   buffer[buf_i].len = len;
+  buffer[buf_i].oci = oci;
   buffer[buf_i].flow = flow;
   buf_i++;
   if (buf_time == 0)
@@ -707,9 +814,18 @@ amonProcessingNfdump (char* line, long time)
     {
       // Quick and dirty check if this is request
       // or reply
-      // reply
+      // reply, switch src and dst so it can go to the
+      // right databrick
       if (flow.sport < 1024 && flow.dport >= 1024)
-	oci = -1;
+	{
+	  oci = -1;
+	  unsigned int tempsrc = flow.src;
+	  flow.src = flow.dst;
+	  flow.dst = tempsrc;
+	  unsigned short tempsport = flow.sport;
+	  flow.sport = flow.dport;
+	  flow.dport = tempsport;
+	}
       // request
       else if (flow.sport >= 1024 && flow.dport < 1024)
 	oci = 1;
@@ -722,10 +838,7 @@ amonProcessingNfdump (char* line, long time)
     // we could fix this for ICMP trafic if type.code
     // is correct in data
     oci=1;
-  if (modality_type == 2)
-    bytes = oci;
-  
-  amonProcessing(flow, bytes, end);
+  amonProcessing(flow, bytes, end, oci);
 }
 
 void
@@ -778,7 +891,7 @@ amonProcessingPcap (struct pfring_pkthdr *h, const u_char * p, long time)
       flow.dport = h->extended_hdr.parsed_pkt.l4_dst_port;
       len = h->len;
 
-      amonProcessing(flow, len, time);
+      amonProcessing(flow, len, time, 0);
     }
 }
 
@@ -812,7 +925,14 @@ reset_transmit (void *passed_params)
       else
 	{
 	  isready = 2;   /* signal that we have started processing what is there */
-	  long mongoTime = dbTime;
+	  // Standardize time
+	  long mongoTime = int(dbTime / interval)*interval;
+	  // Divide databrick items to get measures per second
+	  for(int i=0; i<BRICK_DIMENSION*BRICK_DIMENSION; i++)
+	    {
+	      databrick_p[i] = int(databrick_p[i]/interval);
+	      databrick_s[i] = int(databrick_s[i]/interval);
+	    }
 	  asm volatile ("":::"memory");
 	  printf ("===============%ld======================\n", dbTime);
 	  /*      Entering Critical Section     */
@@ -824,17 +944,7 @@ reset_transmit (void *passed_params)
 	      exit (-1);
 	    }
 	  
-	  databrick_tmp = (unsigned int *) databrick;
-	  databrick = (unsigned int *) databrick_r;
-	  databrick_r = (unsigned int *) databrick_tmp;
 	  
-	  if ((error = pthread_mutex_unlock (&critical_section_lock)))
-	    {
-	      fprintf (stderr,
-		       "Error Number %d For Releasing Lock. FATAL ERROR. \n",
-		       error);
-	      exit (-1);
-	    }			/*      Exiting Critical Section     */
 
 	  if ((error = pthread_mutex_unlock (&time_sync_lock)))
 	    {
@@ -849,11 +959,22 @@ reset_transmit (void *passed_params)
 
 	  /* Transmit databrick to MongoDB - centralized monitoring station */
 	  /* Rajat, here we should send the mongoTime too, to the function. */
-	  export_to_db (databrick_r,/* major_flags_r,*/ cand_r, mongoTime*1000);
+	  export_to_db (databrick_p, databrick_s, mongoTime);
+	  /* Zero down databricks for next time */
+	  memset ((unsigned int *) databrick_p, 0,
+		  BRICK_DIMENSION * BRICK_DIMENSION * sizeof (unsigned int));
+	  memset ((int *) databrick_s, 0,
+		  BRICK_DIMENSION * BRICK_DIMENSION * sizeof (unsigned int));
 	  /* End of mongodb part - this should go into a function */
+
 	  
-	  memset ((unsigned int *) databrick_r, 0,
-	      (BRICK_DIMENSION * BRICK_DIMENSION) * sizeof (unsigned int));
+	  if ((error = pthread_mutex_unlock (&critical_section_lock)))
+	    {
+	      fprintf (stderr,
+		       "Error Number %d For Releasing Lock. FATAL ERROR. \n",
+		       error);
+	      exit (-1);
+	    }			/*      Exiting Critical Section     */
 	  printf ("=====================================================\n");
 	}    
     }
@@ -978,13 +1099,16 @@ main (int argc, char *argv[])
   thiszone = gmt_to_local (0);
 #endif
 
-  while ((c = getopt (argc, argv, "hi:l:vsw:p:b:g:f:m:r:")) != '?')
+  while ((c = getopt (argc, argv, "hi:l:vsw:p:b:g:f:m:n:r:")) != '?')
     {
       if ((c == 255) || (c == -1))
 	break;
 
       switch (c)
 	{
+	case 'n':
+	  interval=atoi(optarg);
+	  break;
 	case 'h':
 	  printHelp ();
 	  return (0);
@@ -1028,100 +1152,23 @@ main (int argc, char *argv[])
 
   if (devices == NULL)
     devices = strdup (parms.default_device);
-
+  
+  sql::Driver *driver;
+  
+  /* Create a connection */
+  driver = get_driver_instance();
+  con = driver->connect(parms.db_client, parms.user, parms.pass);
+  con->setSchema(parms.database);
+  
   srand (parms.seed);
-  init_tables16 (T1_16, T2_16, T3_17);
-
-  int reserved = 0;
-  int STRATA_index = 0;
-  u_int32_t IP_prefix = 0;
-  char line[80];
-  init_STRATA_IDX17 (STRATA_IDX17_prefix_bin);
-
-  FILE *fid;
-  fid = fopen (parms.strata_file, "rt");
-  if (fid != NULL)
-    {
-      //
-      // It is assumed that Strata.txt has lines with the format:
-      //  IP_prefix Index
-      // where the IP_prefix is an IP number and only prefix of the first 17 bits are
-      // considered.  Index is a number from 1 to k, denoting the bin to stratify the prefix to.
-      // All numbers from 1 through k should appear in the file but need not be in any particular order.
-      //  The variable reserved is assigned as the maximum index.
-      //
-      printf ("\n Reading Strata.txt ...");
-      while (fgets (line, 80, fid) != NULL)
-	{
-	  sscanf (line, "%u %d", &IP_prefix, &STRATA_index);
-	  if (STRATA_index > reserved)
-	    {
-	      reserved = STRATA_index;
-	    }
-	  update_STRATA_IDX17 (STRATA_IDX17_prefix_bin,
-			       (u_int32_t) IP_prefix >> 15, STRATA_index);
-	}
-      fclose (fid);
-    }
-  reserved += 1;		// +1 because we have C-based indexing starting from 0
-  printf ("\n Reserved bins = %d \n", reserved);
-  init_IDX17 (IDX17, reserved);
 
   /* Initialize AMON variables and structs */
   /* Define the pointers to the sketch arrays */
-  unsigned int *mem =
-    (unsigned int*)malloc ((BRICK_DIMENSION * BRICK_DIMENSION * 256) *
-	    sizeof (unsigned int) + 7);
-  P_bm = (unsigned int *) (((uintptr_t) mem + 7) & ~(uintptr_t) 0x07);
-  memset ((unsigned int *) P_bm, 0,
-	  (BRICK_DIMENSION * BRICK_DIMENSION * 256) * sizeof (unsigned int));
-
-  unsigned int *mem2 =
-     (unsigned int*)malloc ((BRICK_DIMENSION * BRICK_DIMENSION * 256) *
-	    sizeof (unsigned int) + 7);
-  P_bm_r = (unsigned int *) (((uintptr_t) mem2 + 7) & ~(uintptr_t) 0x07);
-  memset ((unsigned int *) P_bm_r, 0,
-	  (BRICK_DIMENSION * BRICK_DIMENSION * 256) * sizeof (unsigned int));
-  P_bm_tmp = (unsigned int *) P_bm;
-
-  /* Initialize array of candidate keys */
-  u_int64_t *mem3 =
-     (u_int64_t*)malloc (BRICK_DIMENSION * BRICK_DIMENSION * sizeof (flow_t) + 7);
-  cand = (flow_t *) (((uintptr_t) mem3 + 7) & ~(uintptr_t) 0x07);
-  memset ((flow_t *) cand, 0,
-	  BRICK_DIMENSION * BRICK_DIMENSION * sizeof (flow_t));
-
-  u_int64_t *mem4 =
-     (u_int64_t*)malloc (BRICK_DIMENSION * BRICK_DIMENSION * sizeof (flow_t) + 7);
-  cand_r = (flow_t *) (((uintptr_t) mem4 + 7) & ~(uintptr_t) 0x07);
-  memset ((flow_t *) cand_r, 0,
-	  BRICK_DIMENSION * BRICK_DIMENSION * sizeof (flow_t));
-
-  /* Initialize array of counters */
-  long *mem5 =
-     (long*)malloc (BRICK_DIMENSION * BRICK_DIMENSION * sizeof (long) + 7);
-  count = (long *) (((uintptr_t) mem5 + 7) & ~(uintptr_t) 0x07);
-  memset ((long *) count, 0,
-	  BRICK_DIMENSION * BRICK_DIMENSION * sizeof (long));
-
-  long *mem6 =
-     (long*)malloc (BRICK_DIMENSION * BRICK_DIMENSION * sizeof (long) + 7);
-  count_r = (long *) (((uintptr_t) mem6 + 7) & ~(uintptr_t) 0x07);
-  memset ((long *) count_r, 0,
-	  BRICK_DIMENSION * BRICK_DIMENSION * sizeof (long));
-
-  /* Initialize arrays for databricks */
-  unsigned int *mem9 =
-    (unsigned int*) malloc (BRICK_DIMENSION * BRICK_DIMENSION * sizeof (unsigned int) + 7);
-  databrick = (unsigned int *) (((uintptr_t) mem9 + 7) & ~(uintptr_t) 0x07);
-  memset ((unsigned int *) databrick, 0,
+  databrick_p = (unsigned int *) malloc(BRICK_DIMENSION * BRICK_DIMENSION * sizeof (unsigned int));
+  databrick_s = (int *) malloc(BRICK_DIMENSION * BRICK_DIMENSION * sizeof (unsigned int));
+  memset ((unsigned int *) databrick_p, 0,
 	  BRICK_DIMENSION * BRICK_DIMENSION * sizeof (unsigned int));
-
-  unsigned int *mem10 =
-    (unsigned int*)malloc (BRICK_DIMENSION * BRICK_DIMENSION * sizeof (unsigned int) + 7);
-  databrick_r =
-    (unsigned int *) (((uintptr_t) mem10 + 7) & ~(uintptr_t) 0x07);
-  memset ((unsigned int *) databrick_r, 0,
+  memset ((int *) databrick_s, 0,
 	  BRICK_DIMENSION * BRICK_DIMENSION * sizeof (unsigned int));
 
   /* Data is not ready for reading */
@@ -1269,16 +1316,6 @@ main (int argc, char *argv[])
 	  }
       }
 
-      free(mem);
-      free(mem2);
-      free(mem3);
-      free(mem4);
-      free(mem5);
-      free(mem6);
-      //free(mem7);
-      //free(mem8);
-      free(mem9);
-      free(mem10);
       printf("Done with the file\n");
 
 
@@ -1386,15 +1423,6 @@ main (int argc, char *argv[])
 
   for (i = 0; i < num_devs; i++)
     pfring_close (pd[i]);
-
-  free(mem);
-  free(mem2);
-  free(mem3);
-  free(mem4);
-  free(mem5);
-  free(mem6);
-  free(mem9);
-  free(mem10);
 
   return (0);
 }
