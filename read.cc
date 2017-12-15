@@ -63,18 +63,19 @@ int main(void)
     /* Connect to the MySQL test database */
     con->setSchema("amon");
     int bricks[128*128];
-    
+
     try
       {
 	stmt = con->createStatement();
-	string query="SELECT * from records where timestamp=1453503545";
+	string query="SELECT * from records order by timestamp asc";
 	sql::ResultSet* rset = stmt->executeQuery(query.c_str()); //"SELECT timestamp,databrick from records");
 	cout << " Executed query " << rset->rowsCount()<<endl;
 	while (rset->next()) {
 	  /* Access column data by alias or column name */
 	  char* token;
 	  long int tstamp = strtol(rset->getString("timestamp").c_str(), &token, 10);
-	  string out = rset->getString("symmetry");
+	  cout<<"Time "<<tstamp<<endl;
+	  string out = rset->getString("volume");
 	  int* outm = (int*) out.c_str();
 	  cout << " Time "<<tstamp<<endl;
 	  for (int i=0;i<128*128;i++)
