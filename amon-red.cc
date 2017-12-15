@@ -1077,8 +1077,6 @@ main (int argc, char *argv[])
 {
   delimiters = (int*)malloc(AR_LEN*sizeof(int));
   parse_config (&parms);                /* Read config file */
-  int h=hash(3477827584);
-  cout<<"Hash is "<<h<<endl;
 
   char *devices = NULL, *dev = NULL, *tmp = NULL;
   char c, buf[32];
