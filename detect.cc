@@ -49,6 +49,9 @@
 #include "bm_structs.h"
 #include <openssl/sha.h>
 
+
+#define ATTACK_THRESH 12 /* Make this a configurable param */
+#define HIST_LEN 1000    /* How long we remember history */
 #define MAX_NUM_DEVS 64
 #define MAXLEN 128
 #define CONFIG_FILE "amon.config"
@@ -120,9 +123,9 @@ struct flow_p
   flow_t flow;
 };
 
-int *databrick[2];	    /* databrick arrays - volume and symmetry */
 int *dst[2];                /* current volume and symmetry per dst */
-int is_attack[BRICK_DIMENSION]; 
+int is_attack[BRICK_DIMENSION];
+int is_abnormal[BRICK_DIMENSION]; 
 
 /* Types of statistics. If this changes, update the entire section */
 enum period{cur, hist};
@@ -130,6 +133,22 @@ enum type{n, avg, ss};
 enum dim{vol, sym};
 double stats[2][3][2][BRICK_DIMENSION]; /* statistics for attack detection, 
 first dim - CUR, HIST, second dim - N, AVG, SS, third dim - VOL, SYM */
+
+struct record
+{
+  unsigned int timestamp;
+  double avgv;
+  double avgs;
+  double stdv;
+  double stds;
+  double valv;
+  double vals;
+};
+/* Circular array of records so that when we detect attacks we 
+   can generate useful info */
+record records[HIST_LEN][BRICK_DIMENSION];
+int ri=0;
+
 /* This is just for rounds of moving current measures to past */
 int samples = 0;
 int tot_samples = 0;
@@ -233,7 +252,8 @@ void update_dst_arrays()
 	{
 	  for (int j=vol; j<=sym; j++)
 	    {
-	      if (!is_attack[i])
+	      /* Only update if everything looks normal */
+	      if (!is_abnormal[i])
 		{
 		  // Update avg and ss
 		  stats[cur][n][j][i] += 1;
@@ -300,26 +320,46 @@ void detect_attack(unsigned int timestamp)
 {
   for (int i=0;i<BRICK_DIMENSION;i++)
     {
-
-      double meanv = stats[hist][avg][vol][i];
+      double avgv = stats[hist][avg][vol][i];
       double stdv = sqrt(stats[hist][ss][vol][i]/(stats[hist][n][vol][i]-1));
-      double means = stats[hist][avg][sym][i];
+      double avgs = stats[hist][avg][sym][i];
       double stds = sqrt(stats[hist][ss][sym][i]/(stats[hist][n][sym][i]-1));
 
-      //if (i==50)
-      //	cout<<"Stats "<<timestamp<<" avg "<<meanv<<" stdev "<<stdv<<" value "<<dst[sym][i]<<" samples "<<stats[hist][n][sym][i]<<endl;
-
-      if (training_done && abnormal(vol, i, timestamp) && abnormal(sym, i, timestamp) && is_attack[i] == 0)
+      records[ri][i].timestamp = timestamp;
+      records[ri][i].avgv = avgv;     
+      records[ri][i].avgs = avgs;
+      records[ri][i].stdv = stdv;
+      records[ri][i].stds = stds;
+      records[ri][i].valv = dst[vol][i];
+      records[ri][i].vals = dst[sym][i];
+	
+      if (training_done && abnormal(vol, i, timestamp) && abnormal(sym, i, timestamp))
 	{
-	  is_attack[i] = 1;
-	  //is_attack = 1;
-	  cout <<" Attack detected in destination bin " << i << " time " << timestamp << " samples "<<tot_samples<<" mean "<<meanv<<" + 5*"<< stdv<<" < "<<dst[vol][i]<<" and "<<means<<" +- 5*"<<stds<<" inside "<<dst[sym][i]<<endl;
+	  if (!is_attack[i])
+	    is_abnormal[i] ++;
+	  if (is_abnormal[i] > ATTACK_THRESH && is_attack[i] == 0)
+	    {
+	      /* Signal attack detection */
+	      //is_attack = 1;
+	      cout <<" Attack detected in destination bin " << i << " time " << timestamp << " samples "<<tot_samples<<" mean "<<avgv<<" + 5*"<< stdv<<" < "<<dst[vol][i]<<" and "<<avgs<<" +- 5*"<<stds<<" inside "<<dst[sym][i]<<" flag "<<is_attack[i]<<endl;
+	      is_attack[i] = 1;
+	    }
 	}
-      else
+      else if (training_done && !abnormal(vol, i, timestamp) && !abnormal(sym, i, timestamp))
 	{
-	  is_attack[i] = 0;
+	  if (is_abnormal[i] > 0)
+	    is_abnormal[i] --;
+	  if (is_attack[i] > 0 && is_abnormal[i] == 0)
+	    {
+	      /* Signal end of attack */
+	      cout <<" Attack has stopped in destination bin "<< i << " time " << timestamp << " samples "<<tot_samples<<endl;
+	      is_attack[i] = 0;
+	    }
 	}
     }
+  ri++;
+  if (ri == HIST_LEN)
+    ri = 0;
 }
 
 //==========================================================//
@@ -340,19 +380,15 @@ void read_from_db ()
 	long int timestamp = strtol(rset->getString("timestamp").c_str(), &token, 10);
 	string out = rset->getString("volume");
 	unsigned int* outp = (unsigned int*) out.c_str();
-	for (int i=0;i<BRICK_DIMENSION*BRICK_DIMENSION;i++)
-	  databrick[vol][i] = outp[i];
+	for (int i=0;i<BRICK_DIMENSION;i++)
+	  for (int j=0;j<BRICK_DIMENSION;j++)
+	    dst[vol][i] += outp[j*BRICK_DIMENSION+i];
 	out = rset->getString("symmetry");
 	int* outs = (int*) out.c_str();
-	for (int i=0;i<BRICK_DIMENSION*BRICK_DIMENSION;i++)
-	  databrick[sym][i] = outs[i];
-	// Update dst arrays
 	for (int i=0;i<BRICK_DIMENSION;i++)
-	  for(int k=vol; k<=sym; k++)
-	    {
-	      for (int j=0;j<BRICK_DIMENSION;j++)
-		dst[k][i] += databrick[k][j*BRICK_DIMENSION+i];
-	    }
+	  for (int j=0;j<BRICK_DIMENSION;j++)
+	    dst[sym][i] += outs[j*BRICK_DIMENSION+i];
+
 	if (training_done)
 	  detect_attack(timestamp);	
 	else
@@ -415,12 +451,11 @@ int main (int argc, char *argv[])
   /* Define the pointers to the sketch arrays */
   for (int i = vol; i <= sym; i++)
     {
-      databrick[i] = (int *) malloc(BRICK_DIMENSION * BRICK_DIMENSION * sizeof (int));
       dst[i] = (int *) malloc(BRICK_DIMENSION * sizeof (int));
-      memset ((int *) databrick[i], 0, BRICK_DIMENSION * BRICK_DIMENSION * sizeof (int));
       memset ((int *) dst[i], 0, BRICK_DIMENSION * sizeof (int));
     }
   memset ((int *) is_attack, 0, BRICK_DIMENSION * sizeof (int));
+  memset ((int *) is_abnormal, 0, BRICK_DIMENSION * sizeof (int));
   for (int i = cur; i <= hist; i++)
     for (int j = n; j <= ss; j++)
       for (int k = vol; k <= sym; k++)
