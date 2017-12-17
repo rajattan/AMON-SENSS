@@ -33,6 +33,7 @@
 #include <time.h>
 #include <iostream>
 #include <sstream>
+#include <fstream>
 #include <string>
 
 #include "mysql_connection.h"
@@ -126,6 +127,7 @@ struct flow_p
 int *dst[2];                /* current volume and symmetry per dst */
 int is_attack[BRICK_DIMENSION];
 int is_abnormal[BRICK_DIMENSION]; 
+ofstream outfiles[BRICK_DIMENSION];
 
 /* Types of statistics. If this changes, update the entire section */
 enum period{cur, hist};
@@ -276,7 +278,6 @@ void update_dst_arrays()
   tot_samples++;
   if (samples == MIN_SAMPLES)
     {
-      cout << "Samples reached the limit, training "<<training_done<<endl;
       if(!training_done)
 	{
 	  cout<<"Training is done"<<endl;
@@ -341,9 +342,29 @@ void detect_attack(unsigned int timestamp)
 	    {
 	      /* Signal attack detection */
 	      //is_attack = 1;
-	      cout <<" Attack detected in destination bin " << i << " time " << timestamp << " samples "<<tot_samples<<" mean "<<avgv<<" + 5*"<< stdv<<" < "<<dst[vol][i]<<" and "<<avgs<<" +- 5*"<<stds<<" inside "<<dst[sym][i]<<" flag "<<is_attack[i]<<endl;
 	      is_attack[i] = 1;
-	    }
+	      /* Dump records into a file */
+	      cout <<" Attack detected in destination bin " << i << " time " << timestamp << " samples "<<tot_samples<<" mean "<<avgv<<" + 5*"<< stdv<<" < "<<dst[vol][i]<<" and "<<avgs<<" +- 5*"<<stds<<" inside "<<dst[sym][i]<<" flag "<<is_attack[i]<<endl;
+	      char filename[MAXLEN];
+	      sprintf(filename,"%d.log.%u", i, timestamp);
+	      outfiles[i].open(filename);
+	      for (int j = ri+1; j != ri; j++)
+		{
+		  if (records[j][i].timestamp > 0)
+		    {
+			  outfiles[i] <<records[j][i].timestamp<<" "<<records[j][i].avgv<<" ";
+			  outfiles[i] <<records[j][i].stdv<<" "<<records[j][i].valv<<" ";
+			  outfiles[i] <<records[j][i].avgs<<" "<<records[j][i].stds<<" ";
+			  outfiles[i] <<records[j][i].vals<<" 0"<<endl;
+			}
+		      if (j == HIST_LEN)
+			j = 0;
+		    }
+		  outfiles[i] <<records[ri][i].timestamp<<" "<<records[ri][i].avgv<<" ";
+		  outfiles[i] <<records[ri][i].stdv<<" "<<records[ri][i].valv<<" ";
+		  outfiles[i] <<records[ri][i].avgs<<" "<<records[ri][i].stds<<" ";
+		  outfiles[i] <<records[ri][i].vals<<" 1"<<endl;
+		}
 	}
       else if (training_done && !abnormal(vol, i, timestamp) && !abnormal(sym, i, timestamp))
 	{
@@ -447,8 +468,7 @@ int main (int argc, char *argv[])
   con = driver->connect(parms.db_client, parms.user, parms.pass);
   con->setSchema(parms.database);
   
-  /* Initialize AMON variables and structs */
-  /* Define the pointers to the sketch arrays */
+  /* Initialize variables and structs */
   for (int i = vol; i <= sym; i++)
     {
       dst[i] = (int *) malloc(BRICK_DIMENSION * sizeof (int));
