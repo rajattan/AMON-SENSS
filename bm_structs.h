@@ -31,7 +31,6 @@ struct nlist{ /* entry */
     unsigned int val;
 };
 
-unsigned hash(flow_t s);
 
 unsigned long ipow(unsigned long base, int exp);
 

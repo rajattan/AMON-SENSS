@@ -13,12 +13,12 @@ O_FLAG     = -O2 -DHAVE_PF_RING
 #
 # MONGODB
 #
-MONGODIR  = /usr/local/include/libmongoc-1.0
-BSONDIR   = /usr/local/include/libbson-1.0
-MONGOLIBDIR = /usr/local/lib
+#MONGODIR  = /usr/local/include/libmongoc-1.0
+#BSONDIR   = /usr/local/include/libbson-1.0
+#MONGOLIBDIR = /usr/local/lib
 # Search directories
 #
-INCLUDE    =  -I${MONGODIR} -I${BSONDIR} 
+#INCLUDE    =  -I${MONGODIR} -I${BSONDIR} 
 
 #
 # C compiler and flags
@@ -27,7 +27,7 @@ INCLUDE    =  -I${MONGODIR} -I${BSONDIR}
 # CROSS_COMPILE=arm-mv5sft-linux-gnueabi-
 #-std=gnu9
 CC         = ${CROSS_COMPILE}g++ 
-CFLAGS     =  ${O_FLAG} -Wall -std=gnu99 ${INCLUDE} ${DNA_DEFINE} -D HAVE_ZERO -D ENABLE_BPF -D HAVE_LIBNUMA -D HAVE_PTHREAD_SETAFFINITY_NP -O2  -L${MONGOLIBDIR} -g -pg
+CFLAGS     =  ${O_FLAG} -Wall -std=gnu99 ${DNA_DEFINE} -D HAVE_ZERO -D ENABLE_BPF -D HAVE_LIBNUMA -D HAVE_PTHREAD_SETAFFINITY_NP -O2  -g -pg -std=c++0x
 # LDFLAGS  =
 
 #
@@ -43,7 +43,7 @@ LIBS       = -lpcap -lpthread -lpfring  -lrt   -lnuma -lrt -lmongoc-1.0 -lbson-1
 #
 # Main targets
 #
-PFPROGS   = amon-red read detect
+PFPROGS   = amon-red read detect profile
 
 TARGETS   = ${PFPROGS} 
 
@@ -55,11 +55,14 @@ read: read.o
 detect: detect.o
 	${CC} ${CFLAGS} detect.o ${LIBS} -o $@
 
-amon:  bm_structs.o amon.o 
-	${CC} ${CFLAGS} amon.o  bm_structs.o ${LIBS} -o $@
+profile: profile.o utils.o
+	${CC} ${CFLAGS} profile.o utils.o ${LIBS} -o $@
 
-amon-red:  bm_structs.o amon-red.o 
-	${CC} ${CFLAGS} amon-red.o bm_structs.o ${LIBS} -o $@
+amon:  amon.o 
+	${CC} ${CFLAGS} amon.o  ${LIBS} -o $@
+
+amon-red:  amon-red.o utils.o
+	${CC} ${CFLAGS} amon-red.o utils.o ${LIBS} -o $@
 
 clean:
 	@rm -f ${TARGETS} *.o *~

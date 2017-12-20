@@ -1,3 +1,4 @@
+
 //================================================================================//
 //================================================================================//
 /*
@@ -25,6 +26,7 @@
 //================================================================================//
 //================================================================================//
 
+using namespace std;
 
 #include <signal.h>
 #include <iostream>
@@ -33,7 +35,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <string.h>
+#include <string>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <errno.h>
@@ -53,7 +55,9 @@
 #include <regex.h>
 #include <iostream>
 #include <sstream>
+#include <fstream>
 #include <string>
+#include <vector>
 
 #include "mysql_connection.h"
 
@@ -68,13 +72,20 @@
 #include "pfutils.c"
 #include "utils.h"
 
+#define MAX_SAMPLES 1000
+#define MAX_FLOW_SIZE 40000;
+#define MONITOR_INTERVAL 10 /* Monitor for 10 seconds */
+#define FILTER_THRESH 0.3
+
 int* delimiters;
 sql::Connection *con;
 sql::Statement *stmt;
 sql::ResultSet *res;
-int interval=3;
+int interval = 3;
+int is_new = 0;
+int samples = 0;
 
-using namespace std;
+
 
 class DataBuf : public streambuf
 {
@@ -100,6 +111,17 @@ void parse(char* input, char delimiter, int** array)
     }
 }
 
+
+struct stat_r
+{
+  int vol;
+  int oci;
+};
+
+
+bool mysort (pair<int,string> i,pair<int,string> j) { return (i.first < j.first); }
+
+
 long buf_time = 0;
 int buf_cnt = 0;
 int buf_i = 0;
@@ -117,26 +139,22 @@ unsigned long long numPkts = 0, numBytes = 0;
 u_int8_t wait_for_packet = 0, do_shutdown = 0;
 int poll_duration = DEFAULT_POLL_DURATION;
 
+enum stype{src, dst, sport, dport, dstdport, srcsport, srcdst, dstsport};
+
+struct attack
+{
+  int bin;
+  unsigned int start;
+  unsigned int stop;
+  int volume;
+  vector<flow_p> flows;
+};
+
+vector<attack> attacks;
+
 //=======================================//
 //==== Declare AMON-related variables====//
 //=======================================//
-
-u_int8_t modality_type;            /* 0 for bytes, 1 for packets, 2 for 
-				      outstanding connections */
-
-int isready;
-long dbTime = 0;
-long curTime = 0;
-
-
-unsigned int *databrick_p;	    /* databrick arrays - payload */
-int *databrick_s;	            /* databrick arrays - symmetry */
-
-pthread_mutex_t critical_section_lock = PTHREAD_MUTEX_INITIALIZER;
-
-/* Make sure we don't fire if data is not ready */
-pthread_mutex_t time_sync_lock = PTHREAD_MUTEX_INITIALIZER;
-
 
 struct passingThreadParams
 {
@@ -293,112 +311,6 @@ parse_config (struct conf_param * parms)
   fclose (fp);
 }
 
-//=====================================================================//
-//===== Function to parse databrick string to convert into number =====//
-//=====================================================================//
-
-long *string_to_long_array(char *input, long *level)
-{
-    char *cp = strtok(input, ", ");
-    if (cp == NULL) {
-        return (long *) malloc(sizeof(long) * *level);
-    }
-
-    long my_index = -1;
-    long n;
-    if (sscanf(cp, "%ld", &n) == 1) {
-        my_index = *level;
-        *level += 1;
-    }
-    long *array = string_to_long_array(NULL, level);
-    if (my_index >= 0) {
-        array[my_index] = n;
-    }
-    return array;
-}
-
-//==========================================================//
-//=================== Export Databricks to DB ==============//
-//==========================================================//
-void
-export_to_db (unsigned int *databrick_p, int *databrick_s, long timestamp)
-{
-  // First check if there's any data to read and add to
-  sql::Statement *stmt = con->createStatement();
-  char query[256];
- 
-  sprintf(query, "SELECT * from records where timestamp=%ld",timestamp);
- 
-  sql::ResultSet* rset = stmt->executeQuery(query);
-  int n = rset->rowsCount();
-  if (n > 0)
-    {
-      // Read old data and add to it, then update
-      while (rset->next()) {
-	/* Access column data by alias or column name */
-	char* token;
-	string out = rset->getString("volume");
-	unsigned int* outp = (unsigned int*) out.c_str();
-	for (int i=0;i<BRICK_DIMENSION*BRICK_DIMENSION;i++)
-	  databrick_p[i] += outp[i];
-	out = rset->getString("symmetry");
-	int* outs = (int*) out.c_str();
-	for (int i=0;i<BRICK_DIMENSION*BRICK_DIMENSION;i++)
-	  databrick_s[i] += outs[i];
-      }
-      try
-	{
-	  sql::PreparedStatement *pstmt;
-	  pstmt = con->prepareStatement("UPDATE records set volume=?, symmetry=? where timestamp=?");
-	  pstmt->setUInt(3, timestamp);
-	  unsigned char* pChars = (unsigned char*) databrick_p;
-	  DataBuf pbuf((char*)pChars, BRICK_DIMENSION*BRICK_DIMENSION*sizeof(unsigned int));
-	  istream pstream(&pbuf);
-	  pstmt->setBlob(1,&pstream);
-	  pChars = (unsigned char*) databrick_s;
-	  DataBuf sbuf((char*)pChars, BRICK_DIMENSION*BRICK_DIMENSION*sizeof(int));
-	  istream sstream(&sbuf);
-	  pstmt->setBlob(2,&sstream);
-	  bool res = pstmt->execute();
-	  pstmt->close();
-	  delete pstmt;
-	} catch (sql::SQLException &e) {
-	cout << "# ERR: SQLException in " << __FILE__;
-	cout << "# ERR: " << e.what();
-	cout << " (MySQL error code: " << e.getErrorCode();
-	cout << ", SQLState: " << e.getSQLState() << " )\n";
-      }
-    }
-  else
-    {
-      try
-	{
-	  sql::PreparedStatement *pstmt;
-	  pstmt = con->prepareStatement("INSERT into records (timestamp,volume,symmetry) values (?,?,?)");
-	  pstmt->setUInt(1, timestamp);
-	  cout << " TIMESTAMP " << timestamp << endl;
-	  unsigned char* pChars = (unsigned char*) databrick_p;
-	  DataBuf pbuf((char*)pChars, BRICK_DIMENSION*BRICK_DIMENSION*sizeof(unsigned int));
-	  istream pstream(&pbuf);
-	  pstmt->setBlob(2,&pstream);
-	  pChars = (unsigned char*) databrick_s;
-	  DataBuf sbuf((char*)pChars, BRICK_DIMENSION*BRICK_DIMENSION*sizeof(int));
-	  istream sstream(&sbuf);
-	  pstmt->setBlob(3,&sstream);
-	  bool res = pstmt->execute();
-	  pstmt->close();
-	  delete pstmt;
-	} catch (sql::SQLException &e) {
-	cout << "# ERR: SQLException in " << __FILE__;
-	cout << "# ERR: " << e.what();
-	cout << " (MySQL error code: " << e.getErrorCode();
-	cout << ", SQLState: " << e.getSQLState() << " )\n";
-      }
-    }
-  stmt->close();
-  delete rset;
-  delete stmt;
-}
 
 /******************************************************************/
 
@@ -609,107 +521,58 @@ intoa (unsigned int addr)
 
   return (_intoa (addr, buf, sizeof (buf)));
 }
-/*****************************************************************/
 
-
-/*****************************************************************/
-
-void amonReprocess()
+void addSample(vector<attack>::iterator it, flow_p f)
 {
-  int s_bucket = 0, d_bucket = 0;	    /* indices for the databrick */
-  int error;
-  unsigned int payload;
+  /* Decide based on flow size and asymmetry if to add it or not */
+  int toadd1 = rand() % MAX_FLOW_SIZE;
+  int toadd2 = rand() % 2;
+    /* Add asymmetric flows rather than symmetric ones, and add longer flows before shorter ones */
+  if (toadd1 > f.len || toadd2 > abs(f.oci))
+    return;
 
-  for (int i=0; i<BUF_SIZE;i++)
+  
+  if (it->flows.size() < MAX_SAMPLES)
     {
-      flow_t flow = buffer[i].flow;
-      long time = buffer[i].time;
-      int len = buffer[i].len;
-      int oci = buffer[i].oci;
-      if (time != buf_time)                 /* ignore flows that are not in the current time slot */	
-	continue;
-      curTime = buf_time;
-      if (dbTime == 0)
-	dbTime = buf_time;
-      // If data is very much out of order we may have
-      // a "crippled" second. That is fine since we add
-      // data to databricks in database
-      if (curTime - dbTime >= interval)
-	{
-	  if (isready == 0)
-	    {
-	      int diff = curTime - dbTime;
-	      printf("Ready to process time %ld curtime %ld diff %d\n", time, curTime, diff);
-	      isready = 1;
-	    }
-	  else if(isready == 2)
-	    {
-	      isready = 0;
-	      int diff = curTime - dbTime;
-	      dbTime = curTime;
-	      printf("Ready and done, lastTime is now %ld curTime %ld diff %d\n", dbTime, curTime, diff);
-	    }
-	}
-      s_bucket = sha_hash(flow.src); /* Jelena: should add  & mask */
-      d_bucket = sha_hash(flow.dst); /* Jelena: should add  & mask */
-
-      int error;
-      if ((error = pthread_mutex_lock (&critical_section_lock)))
-	{
-	  fprintf (stderr,
-		   "Error Number %d For Acquiring Lock. FATAL ERROR. \n",
-		   error);
-	  exit (-1);
-	}
-      databrick_p[s_bucket * BRICK_DIMENSION + d_bucket] += len;	// add bytes to payload databrick
-      databrick_s[s_bucket * BRICK_DIMENSION + d_bucket] += oci;	// add oci to symmetry databrick
-      if ((error = pthread_mutex_unlock (&critical_section_lock)))
-	{
-	  fprintf (stderr,
-		   "Error Number %d For Releasing Lock. FATAL ERROR. \n",
-		   error);
-	  exit (-1);
-	}			/*      Exiting Critical Section     */
-    }
-}
-
-void
-amonProcessing(flow_t flow, int len, long time, int oci)
-{
-  // Just insert data into buffer
-  if (buf_i == BUF_SIZE-1)
-    {
-      amonReprocess();
-      buf_i = 0;
-      buf_cnt = 0;
-      buf_time = 0;
-    }
-  buffer[buf_i].time = time;
-  buffer[buf_i].len = len;
-  buffer[buf_i].oci = oci;
-  buffer[buf_i].flow = flow;
-  buf_i++;
-  if (buf_time == 0)
-    {
-      buf_time = time;
-      buf_cnt = 1;
-    }
-  else if (buf_time != time)
-    {
-      buf_cnt--;
-      if (buf_cnt == 0)
-	{
-	  buf_time = time;
-	  buf_cnt = 1;
-	}
+      it->flows.push_back(f);
     }
   else
-    buf_cnt++;
+    {
+      /* with 50% chance replace the flow you have already */
+      int replace = rand() % 2;
+      if (replace)
+	{
+	  int index = rand() % MAX_SAMPLES;
+	  it->flows[index] = f;
+	}
+    }
+}
+
+void
+profilerProcessing(flow_t flow, int len, long time, int oci)
+{
+  /* Figure out if this flow is part of the flows in the attack bin
+     and if yes then record its data */
+  int record = 0;
+  for(vector<attack>::iterator it = attacks.begin(); it != attacks.end(); it++)
+    {
+      if (it->start <= time && it->start + MONITOR_INTERVAL >= time)
+	{
+	  /* Time fits, let's check bin */
+	  int d_bucket = sha_hash(flow.dst); /* Jelena: should add  & mask */
+	  if (d_bucket == it->bin)
+	    {
+	      /* Sample this one */
+	      flow_p f={time, len, oci, flow};
+	      addSample(it, f);
+	    }
+	}
+    }  
 }
 
 
 void
-amonProcessingNfdump (char* line, long time)
+profilerProcessingNfdump (char* line, long time)
 {
   /* 2|1453485557|768|1453485557|768|6|0|0|0|2379511808|44694|0|0|0|2792759296|995|0|0|0|0|2|0|1|40 */
   // Get start and end time of a flow
@@ -761,15 +624,7 @@ amonProcessingNfdump (char* line, long time)
       // reply, switch src and dst so it can go to the
       // right databrick
       if (flow.sport < 1024 && flow.dport >= 1024)
-	{
 	  oci = -1;
-	  unsigned int tempsrc = flow.src;
-	  flow.src = flow.dst;
-	  flow.dst = tempsrc;
-	  unsigned short tempsport = flow.sport;
-	  flow.sport = flow.dport;
-	  flow.dport = tempsport;
-	}
       // request
       else if (flow.sport >= 1024 && flow.dport < 1024)
 	oci = 1;
@@ -782,11 +637,11 @@ amonProcessingNfdump (char* line, long time)
     // we could fix this for ICMP trafic if type.code
     // is correct in data
     oci=1;
-  amonProcessing(flow, bytes, end, oci);
+  profilerProcessing(flow, bytes, end, oci);
 }
 
 void
-amonProcessingPcap (struct pfring_pkthdr *h, const u_char * p, long time)
+profilerProcessingPcap (struct pfring_pkthdr *h, const u_char * p, long time)
 {
 
   struct ether_header ehdr;
@@ -835,95 +690,63 @@ amonProcessingPcap (struct pfring_pkthdr *h, const u_char * p, long time)
       flow.dport = h->extended_hdr.parsed_pkt.l4_dst_port;
       len = h->len;
 
-      amonProcessing(flow, len, time, 0);
+      profilerProcessing(flow, len, time, 0);
     }
 }
 
-
-/***********************************************************************/
-void *
-reset_transmit (void *passed_params)
+void addToSig(string& sig, int type, string key)
 {
-  int error;
-  while (1)
+  string filter = "";
+  switch(type)
     {
-      usleep(1000);
-      if ((error = pthread_mutex_lock (&time_sync_lock)))
-	{
-	  fprintf (stderr,
-		   "Error Number %d For Acquiring Lock. FATAL ERROR. \n",
-		   error);
-	  exit (-1);
-	}
-      /* Check if data is ready */
-      if (!isready)
-	{
-	  if ((error = pthread_mutex_unlock (&time_sync_lock)))
-	    {
-	      fprintf (stderr,
-		       "Error Number %d For Releasing Lock. FATAL ERROR. \n",
-		       error);
-	      exit (-1);
-	    }			/*      Exiting Critical Section     */
-	}
-      else
-	{
-	  isready = 2;   /* signal that we have started processing what is there */
-	  // Standardize time
-	  long mongoTime = int(dbTime / interval)*interval;
-	  // Divide databrick items to get measures per second
-	  for(int i=0; i<BRICK_DIMENSION*BRICK_DIMENSION; i++)
-	    {
-	      databrick_p[i] = int(databrick_p[i]/interval);
-	      databrick_s[i] = int(databrick_s[i]/interval);
-	    }
-	  asm volatile ("":::"memory");
-	  printf ("===============%ld======================\n", dbTime);
-	  /*      Entering Critical Section     */
-	  if ((error = pthread_mutex_lock (&critical_section_lock)))
-	    {
-	      fprintf (stderr,
-		       "Error Number %d For Acquiring Lock. FATAL ERROR. \n",
-		       error);
-	      exit (-1);
-	    }
-	  
-	  
-
-	  if ((error = pthread_mutex_unlock (&time_sync_lock)))
-	    {
-	      fprintf (stderr,
-		       "Error Number %d For Releasing Lock. FATAL ERROR. \n",
-		       error);
-	      exit (-1);
-	    }			/*      Exiting Critical Section     */
-
-
-	  printf("\n Timestamp %ld \n",mongoTime);
-
-	  /* Transmit databrick to MongoDB - centralized monitoring station */
-	  /* Rajat, here we should send the mongoTime too, to the function. */
-	  export_to_db (databrick_p, databrick_s, mongoTime);
-	  /* Zero down databricks for next time */
-	  memset ((unsigned int *) databrick_p, 0,
-		  BRICK_DIMENSION * BRICK_DIMENSION * sizeof (unsigned int));
-	  memset ((int *) databrick_s, 0,
-		  BRICK_DIMENSION * BRICK_DIMENSION * sizeof (unsigned int));
-	  /* End of mongodb part - this should go into a function */
-
-	  
-	  if ((error = pthread_mutex_unlock (&critical_section_lock)))
-	    {
-	      fprintf (stderr,
-		       "Error Number %d For Releasing Lock. FATAL ERROR. \n",
-		       error);
-	      exit (-1);
-	    }			/*      Exiting Critical Section     */
-	  printf ("=====================================================\n");
-	}    
+    case src:
+      filter = "src";
+      break;
+    case dst:
+      filter = "dst";
+      break;
+    case sport:
+      filter = "sport";
+      break;
+    case dport:
+      filter = "dport";
+      break;
+    default:
+      break;
     }
-  pthread_exit (NULL);
+  if (filter != "")
+    sig += (filter + "=" + key);
+  else
+    {
+      string filter1, filter2;
+      switch(type)
+	{
+	case srcsport:
+	  filter1 = "src";
+	  filter2 = "sport";
+	  break;
+	case dstdport:
+	  filter1 = "dst";
+	  filter2 = "dport";
+	  break;
+	case srcdst:
+	  filter1 = "src";
+	  filter2 = "dst";
+	  break;
+	case dstsport:
+	  filter1 = "dst";
+	  filter2 = "sport";
+	  break;
+	default:
+	  break;
+	}
+      int colon = key.find(":");
+      string key1 = key.substr(0,colon);
+      string key2 = key.substr(colon+1);
+      sig += (filter1 + "=" + key1 + " and " + filter2 + "=" + key2);
+    }
 }
+
 
 /*************************************************************************/
 
@@ -983,17 +806,14 @@ packetConsumer ()
   memset (&hdr, 0, sizeof (hdr));
   int next = 0, hunger = 0;
 
-
-
   while (!do_shutdown)
     {
-
       if (pfring_is_pkt_available (pd[next]))
 	{
 	  if (pfring_recv
 	      (pd[next], &buffer, 0, &hdr, 0 /* wait_for_packet */ ) > 0)
 	    {
-	      amonProcessingPcap(&hdr, buffer, time(0));
+	      profilerProcessingPcap(&hdr, buffer, time(0));
 	      numPkts++;
 	      numBytes += hdr.len + 24 /* 8 Preamble + 4 CRC + 12 IFG */ ;
 	    }
@@ -1012,6 +832,7 @@ packetConsumer ()
       next = (next + 1) % num_devs;
     }
 }
+
 
 /***********************************************************************/
 
@@ -1035,6 +856,7 @@ main (int argc, char *argv[])
   int retstatus;
   char *bpfFilter = NULL;
   char *pcap_in = NULL;
+  char *alert_in = NULL;
   struct bpf_program fcode;
   int ispcap = 0; /* Flag telling us the file format, pcap or nfdump/flow-tools */
 
@@ -1043,7 +865,7 @@ main (int argc, char *argv[])
   thiszone = gmt_to_local (0);
 #endif
 
-  while ((c = getopt (argc, argv, "hi:l:vsw:p:b:g:f:m:n:r:")) != '?')
+  while ((c = getopt (argc, argv, "hi:l:vsw:p:b:g:f:n:r:a:")) != '?')
     {
       if ((c == 255) || (c == -1))
 	break;
@@ -1059,7 +881,11 @@ main (int argc, char *argv[])
 	  break;
 	case 'r':
 	  pcap_in = strdup (optarg);
-	  printf("Pcap in is %s\n", pcap_in);
+	  printf("Pcaps are in list %s\n", pcap_in);
+	  break;
+	case 'a':
+	  alert_in = strdup (optarg);
+	  printf("Alerts are in %s\n", alert_in);
 	  break;
 	case 's':
 	  wait_for_packet = 1;
@@ -1072,9 +898,6 @@ main (int argc, char *argv[])
 	  break;
 	case 'f':
 	  bpfFilter = strdup (optarg);
-	  break;
-	case 'm':
-	  modality_type = atoi(optarg);
 	  break;
 #ifdef VERBOSE_SUPPORT
 	case 'v':
@@ -1107,165 +930,277 @@ main (int argc, char *argv[])
   
   srand (parms.seed);
 
-  /* Initialize AMON variables and structs */
-  /* Define the pointers to the sketch arrays */
-  databrick_p = (unsigned int *) malloc(BRICK_DIMENSION * BRICK_DIMENSION * sizeof (unsigned int));
-  databrick_s = (int *) malloc(BRICK_DIMENSION * BRICK_DIMENSION * sizeof (unsigned int));
-  memset ((unsigned int *) databrick_p, 0,
-	  BRICK_DIMENSION * BRICK_DIMENSION * sizeof (unsigned int));
-  memset ((int *) databrick_s, 0,
-	  BRICK_DIMENSION * BRICK_DIMENSION * sizeof (unsigned int));
 
-  /* Data is not ready for reading */
-  isready = 0;
+  /* Read alerts from a file and use that to preselect files that we will
+     read to identify attacks */
+  ifstream inFile;
+  inFile.open(alert_in);
+  if (!inFile)
+    {
+      cerr << "Unable to open file " << alert_in << endl;
+      exit(1);
+    }
+  string type;
+  int bin;
+  int time;
+   
+  while (inFile >> type >> bin >> time)
+    {
+      if (type == "START")
+	{
+	  attack a = {bin, time, 0};
+	  attacks.push_back(a);
+	}
+      else
+	{
+	  if (!attacks.empty())
+	    {
+	      vector<attack>::iterator it = attacks.end() - 1;
+	      if (it->bin == bin)
+		it->stop = time;
+	    }
+	}
+    }
   
   /* libpcap functionality follows */
   if (pcap_in)
     {
-      char ebuf[256];
-      u_char *p;
-      struct pcap_pkthdr *h;
-      /* This is going to be a pointer to input
-	 stream, either from PCAP or nfdump or flow-tools */
-      pcap_t *pt;
-      FILE* nf;
-      
-      unsigned long long num_pcap_pkts = 0;
-      struct timeval beginning = { 0, 0 };
-      struct pfring_pkthdr hdr;
-      memset (&hdr, 0, sizeof (hdr));
-
-      pt = pcap_open_offline (pcap_in, ebuf);
-      if (pt)
-	ispcap = 1;
-      else
-	{
-	  ispcap = 0;
-	  char cmd[300];
-	  sprintf(cmd,"nfdump -r %s -o pipe 2>/dev/null", pcap_in);
-	  nf = popen(cmd, "r");
-	  /* Close immediately so we get the error code 
-	     and we can detect if this is maybe flow-tools format */
-	  int error = pclose(nf);
-	  if (error == 64000)
-	    {
-	      //sprintf(cmd,"ft2nfdump -r %s | nfdump -r - -o 'fmt:%%ts %%te %%pr %%sap -> %%dap %%flg %%pkt %%byt %%fl'", pcap_in);
-	      sprintf(cmd,"ft2nfdump -r %s | nfdump -r - -o pipe", pcap_in);
-	      nf = popen(cmd, "r");
-	    }
-	  else
-	    {
-	      nf = popen(cmd, "r");
-	    }
-	  if (!nf)
-	    {
-	      fprintf(stderr,"Cannot open file %s for reading. Unknown format.\n", pcap_in);
-	      exit(1);
-	    }
-	  else
-	    {
-	      /* Remove first line, it is the header */
-	      char line[MAX_LINE];
-	      fgets(line, MAX_LINE, nf);
-	    }
-	}
-    if (ispcap)
-    {
-	  int datalink = pcap_datalink (pt);
-
-	  if (datalink != DLT_EN10MB)
-	    printf ("WARNING [pcap] Datalink not DLT_EN10MB (Ethernet).\n");
-
-	  if (bpfFilter != NULL)
-	    {
-	      if (pcap_compile (pt, &fcode, bpfFilter, 1, 0xFFFFFF00) < 0)
-		{
-		  printf ("pcap_compile error: '%s'\n", pcap_geterr (pt));
-		}
-	      else
-		{
-		  if (pcap_setfilter (pt, &fcode) < 0)
-		    {
-		      printf ("pcap_setfilter error: '%s'\n",
-			      pcap_geterr (pt));
-		    }
-		}
-	    }
-    }
-    else
-      {
-	/* Filter with nfdump, so far this is unsupported */
-      }
-    /* Ready to start the reset and transmit helper thread */
-    int retstatus =
-      pthread_create (&thread_id, NULL, reset_transmit, NULL);
-    if (retstatus)
-      {
-	printf ("ERROR; return code from pthread_create() is %d\n",
-		retstatus);
-	exit (-1);
-      }
-
-    if (ispcap)
-      {
-	while (1)
+      /* Read all relevant files */
+        ifstream inFile;
+	inFile.open(pcap_in);
+	if (!inFile)
 	  {
-	    int rc = pcap_next_ex (pt, &h, (const u_char **) &p);
-	    
-	    if (rc <= 0)
-	      break;
-	    
-	    if (num_pcap_pkts == 0)
-	      {
-		curTime = h->ts.tv_sec;
-		dbTime = 0;
-		beginning.tv_sec = h->ts.tv_sec;
-		beginning.tv_usec = h->ts.tv_usec;
-		printf ("First packet seen at %ld\n",
-			beginning.tv_sec * 1L);
-	      }
-	    num_pcap_pkts++;
-	    
-	    memcpy (&hdr, h, sizeof (struct pcap_pkthdr));
-	    amonProcessingPcap(&hdr, p, h->ts.tv_sec);
+	    cerr << "Unable to open file " << pcap_in << endl;
+	    exit(1);
 	  }
-      }
-    else
-      {
-	char line[MAX_LINE];
-	while (fgets(line, MAX_LINE, nf) != NULL)
+	string pcapfile;
+	
+	while (inFile >> pcapfile)
 	  {
-	    // Check that this is the line with a flow
-	    char tmpline[255];
-	    strcpy(tmpline, line);
-	    if (strstr(tmpline, "|") == NULL)
-	      continue;
-	    strtok(tmpline,"|");
-	    strtok(NULL,"|");
-	    strtok(NULL,"|");
-	    char* tokene;
-	    char* token = strtok(NULL, "|");
-	    long epoch = strtol(token, &tokene, 10);
-	    token = strtok(NULL, "|");
-	    int msec = atoi(token);
-	    if (num_pcap_pkts == 0)
+	    /* Check if timing of this file overlaps some attack */
+	    /* /nfs_ds/users/mirkovic/nfs_ds/radb_ddos/EQX2k/2016/2016-01/2016-01-21/ft-v05.2016-01-21.090006-0500 */
+	    int index = pcapfile.rfind("/");
+	    string name = pcapfile.substr(index+1);
+	    int i1, i2, i3;
+	    i1 = name.find(".");
+	    i2 = name.find("-");
+	    string sname = name.substr(i1+1,i2-i1);
+	    i1 = sname.find("-");
+	    int year = stoi(sname.substr(0, i1));
+	    i2 = sname.find("-", i1+1);
+	    int month = stoi(sname.substr(i1+1, i2-i1));
+	    i3 = sname.find(".", i2+1);
+	    int day = stoi(sname.substr(i2+1, i3-i2));
+	    int hour = stoi(sname.substr(i3+1, 2));
+	    
+	    cout<<"Sname "<<sname<<" year "<<year<<" month "<<month<<" day "<<day<<"hour "<<hour<<endl;
+	    char ebuf[256];
+	    u_char *p;
+	    struct pcap_pkthdr *h;
+	    /* This is going to be a pointer to input
+	       stream, either from PCAP or nfdump or flow-tools */
+	    pcap_t *pt;
+	    FILE* nf;
+	    unsigned long long num_pcap_pkts = 0;
+	    struct timeval beginning = { 0, 0 };
+	    struct pfring_pkthdr hdr;
+	    memset (&hdr, 0, sizeof (hdr));
+	    is_new = 1;
+	    samples = 0;
+	    
+	    pt = pcap_open_offline (pcapfile.c_str(), ebuf);
+	    if (pt)
+	      ispcap = 1;
+	    else
 	      {
-		curTime = epoch;
-		beginning.tv_sec = epoch;
-		beginning.tv_usec = msec*1000;
-		printf ("First packet seen at %ld\n",
-			beginning.tv_sec * 1L);
+		ispcap = 0;
+		char cmd[300];
+		sprintf(cmd,"nfdump -r %s -o pipe 2>/dev/null", pcapfile.c_str());
+		nf = popen(cmd, "r");
+		/* Close immediately so we get the error code 
+		   and we can detect if this is maybe flow-tools format */
+		int error = pclose(nf);
+		if (error == 64000)
+		  {
+		    //sprintf(cmd,"ft2nfdump -r %s | nfdump -r - -o 'fmt:%%ts %%te %%pr %%sap -> %%dap %%flg %%pkt %%byt %%fl'", pcap_in);
+		    sprintf(cmd,"ft2nfdump -r %s | nfdump -r - -o pipe", pcapfile.c_str());
+		    nf = popen(cmd, "r");
+		  }
+		else
+		  {
+		    nf = popen(cmd, "r");
+		  }
+		if (!nf)
+		  {
+		    fprintf(stderr,"Cannot open file %s for reading. Unknown format.\n", pcapfile.c_str());
+		    exit(1);
+		  }
+		else
+		  {
+		    /* Remove first line, it is the header */
+		    char line[MAX_LINE];
+		    fgets(line, MAX_LINE, nf);
+		  }
 	      }
-	    num_pcap_pkts++;
-	    amonProcessingNfdump(line, epoch);
+	    if (ispcap)
+	      {
+		int datalink = pcap_datalink (pt);
+		
+		if (datalink != DLT_EN10MB)
+		  printf ("WARNING [pcap] Datalink not DLT_EN10MB (Ethernet).\n");
+		
+		if (bpfFilter != NULL)
+		  {
+		    if (pcap_compile (pt, &fcode, bpfFilter, 1, 0xFFFFFF00) < 0)
+		      {
+			printf ("pcap_compile error: '%s'\n", pcap_geterr (pt));
+		      }
+		    else
+		      {
+			if (pcap_setfilter (pt, &fcode) < 0)
+			  {
+			    printf ("pcap_setfilter error: '%s'\n",
+				    pcap_geterr (pt));
+			  }
+		      }
+		  }
+	      }
+	    else
+	      {
+		/* Filter with nfdump, so far this is unsupported */
+	      }
+	    
+	    if (ispcap)
+	      {
+		while (1)
+		  {
+		    int rc = pcap_next_ex (pt, &h, (const u_char **) &p);
+		    
+		    if (rc <= 0)
+		      break;
+		    
+		    if (num_pcap_pkts == 0)
+		      {
+			beginning.tv_sec = h->ts.tv_sec;
+			beginning.tv_usec = h->ts.tv_usec;
+			printf ("First packet seen at %ld\n",
+				beginning.tv_sec * 1L);
+		      }
+		    num_pcap_pkts++;
+		    
+		    memcpy (&hdr, h, sizeof (struct pcap_pkthdr));
+		    profilerProcessingPcap(&hdr, p, h->ts.tv_sec);
+		    if (is_new == 0)
+		      break;
+		  }
+	      }
+	    else
+	      {
+		char line[MAX_LINE];
+		while (fgets(line, MAX_LINE, nf) != NULL)
+		  {
+		    // Check that this is the line with a flow
+		    char tmpline[255];
+		    strcpy(tmpline, line);
+		    if (strstr(tmpline, "|") == NULL)
+		      continue;
+		    strtok(tmpline,"|");
+		    strtok(NULL,"|");
+		    strtok(NULL,"|");
+		    char* tokene;
+		    char* token = strtok(NULL, "|");
+		    long epoch = strtol(token, &tokene, 10);
+		    token = strtok(NULL, "|");
+		    int msec = atoi(token);
+		    if (num_pcap_pkts == 0)
+		      {
+			beginning.tv_sec = epoch;
+			beginning.tv_usec = msec*1000;
+			printf ("First packet seen at %ld\n",
+				beginning.tv_sec * 1L);
+		      }
+		    num_pcap_pkts++;
+		    profilerProcessingNfdump(line, epoch);
+		    if (is_new == 0)
+		      break;
+		  }
+	      }
+	    printf("Done with the file\n");
 	  }
-      }
-
-      printf("Done with the file\n");
-
-
-
-      return 0;			// Exit program
+	for (vector<attack>::iterator it=attacks.begin(); it != attacks.end(); it++)
+	  {
+	    if (it->flows.size() > 0)
+	      {
+		/* Find a signature if it exists */
+		map <string,stat_r> stats[8];
+		int vol = 0;
+		int oci = 0;
+		for (vector<flow_p>::iterator fit = it->flows.begin(); fit != it->flows.end(); fit++)
+		  {
+		    flow_p f = *fit;
+		    cout<<"Flow "<<f.flow.src<<":"<<f.flow.sport<<" "<<f.flow.dst<<":"<<f.flow.dport<<" "<<f.len<<" "<<f.oci<<endl;
+		    vol += f.len;
+		    oci += f.oci;
+		    for (int s=src; s<=dstsport; s++)
+		      {
+			string key;
+			switch(s)
+			  {
+			  case src:
+			    key = to_string(f.flow.src);
+			    break;
+			  case sport:
+			    key = to_string(f.flow.sport);
+			    break;
+			  case dst:
+			    key = to_string(f.flow.dst);
+			    break;
+			  case dport:
+			    key = to_string(f.flow.dport);
+			    break;
+			  case dstdport:
+			    key = to_string(f.flow.dst)+":"+to_string(f.flow.dport);
+			    break;
+			  case srcsport:
+			    key = to_string(f.flow.src)+":"+to_string(f.flow.sport);
+			    break;
+			  case srcdst:
+			    key = to_string(f.flow.src)+":"+to_string(f.flow.dst);
+			    break;
+			  case dstsport:
+			    key = to_string(f.flow.dst)+":"+to_string(f.flow.sport);
+			    break;
+			  default:
+			    break;
+			  }
+			if (stats[s].find(key) == stats[s].end())
+			  stats[s][key] = {0,0};
+			stats[s][key].vol += f.len;
+			stats[s][key].oci += f.oci;
+		      }
+		  }
+		for (int s=src; s<=dstsport; s++)
+		  {
+		    int curvol = 0;
+		    int curoci = 0;
+		    string signature="";
+		    for (map<string,stat_r>::iterator sit=stats[s].begin(); sit != stats[s].end(); sit++)
+		      {
+			if (sit->second.vol > vol * FILTER_THRESH)
+			  {
+			    addToSig(signature, s, sit->first);
+			    curvol += sit->second.vol;
+			    curoci += sit->second.oci;
+			  }
+		      }
+		    cout<<s<<"Signature "<<signature;
+		    double rv = (double)curvol/vol;
+		    double ro = oci>0 ? (double)curoci/oci : 1;
+		    cout<<" dropped volume "<<rv<<" and oci "<<ro<<endl;
+		  }
+	      }
+	  }
+      return 0;	
     }
 
   /* PF_RING functionality follows */
@@ -1353,13 +1288,6 @@ main (int argc, char *argv[])
 
   if (bind_core >= 0)
     bind2core (bind_core);
-
-  retstatus = pthread_create (&thread_id, NULL, reset_transmit, NULL);
-  if (retstatus)
-    {
-      printf ("ERROR; return code from pthread_create() is %d\n", retstatus);
-      exit (-1);
-    }
 
   packetConsumer ();
 

@@ -333,7 +333,14 @@ void detect_attack(unsigned int timestamp)
       records[ri][i].stds = stds;
       records[ri][i].valv = dst[vol][i];
       records[ri][i].vals = dst[sym][i];
-	
+
+      if (is_attack[i])
+	{
+	  outfiles[i] <<records[ri][i].timestamp<<" "<<records[ri][i].avgv<<" ";
+	  outfiles[i] <<records[ri][i].stdv<<" "<<records[ri][i].valv<<" ";
+	  outfiles[i] <<records[ri][i].avgs<<" "<<records[ri][i].stds<<" ";
+	  outfiles[i] <<records[ri][i].vals<<" 1"<<endl;
+	}
       if (training_done && abnormal(vol, i, timestamp) && abnormal(sym, i, timestamp))
 	{
 	  if (!is_attack[i])
@@ -347,6 +354,7 @@ void detect_attack(unsigned int timestamp)
 	      cout <<" Attack detected in destination bin " << i << " time " << timestamp << " samples "<<tot_samples<<" mean "<<avgv<<" + 5*"<< stdv<<" < "<<dst[vol][i]<<" and "<<avgs<<" +- 5*"<<stds<<" inside "<<dst[sym][i]<<" flag "<<is_attack[i]<<endl;
 	      char filename[MAXLEN];
 	      sprintf(filename,"%d.log.%u", i, timestamp);
+	      outfiles[i].close();
 	      outfiles[i].open(filename);
 	      for (int j = ri+1; j != ri; j++)
 		{
