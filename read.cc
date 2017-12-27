@@ -67,7 +67,7 @@ int main(void)
     try
       {
 	stmt = con->createStatement();
-	string query="SELECT * from records order by timestamp asc";
+	string query="SELECT * from databricks where trace='chargen' order by timestamp asc";
 	sql::ResultSet* rset = stmt->executeQuery(query.c_str()); //"SELECT timestamp,databrick from records");
 	cout << " Executed query " << rset->rowsCount()<<endl;
 	while (rset->next()) {
@@ -75,11 +75,13 @@ int main(void)
 	  char* token;
 	  long int tstamp = strtol(rset->getString("timestamp").c_str(), &token, 10);
 	  cout<<"Time "<<tstamp<<endl;
-	  string out = rset->getString("volume");
-	  int* outm = (int*) out.c_str();
+	  string out1 = rset->getString("volume");
+	  int* outv = (int*) out1.c_str();
+	  string out2 = rset->getString("symmetry");
+	  int* outs = (int*) out2.c_str();
 	  cout << " Time "<<tstamp<<endl;
 	  for (int i=0;i<128*128;i++)
-	    cout<< i<< " value is " << outm[i] << "\n";
+	    cout<<tstamp<<" bin="<<i<< " value is " << outv[i] <<" "<<outs[i]<< "\n";
 	  cout << endl;
 	  //rstream >> outm;
 	}

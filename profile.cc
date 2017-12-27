@@ -992,8 +992,31 @@ main (int argc, char *argv[])
 	    i3 = sname.find(".", i2+1);
 	    int day = stoi(sname.substr(i2+1, i3-i2));
 	    int hour = stoi(sname.substr(i3+1, 2));
-	    
-	    cout<<"Sname "<<sname<<" year "<<year<<" month "<<month<<" day "<<day<<"hour "<<hour<<endl;
+	    struct tm t;
+	    time_t epoch;
+
+	    t.tm_year = year-1900;
+	    t.tm_mon = month-1;           // Month, 0 - jan
+	    t.tm_mday = day;          // Day of the month
+	    t.tm_hour = hour;
+	    t.tm_min = 0;
+	    t.tm_sec = 0;
+	    t.tm_isdst = -1;        // Is DST on? 1 = yes, 0 = no, -1 = unknown
+	    epoch = mktime(&t) - timezone + TIMEZONE_ADJUST;
+
+	    /* Does this file contain packets for any detected alert? */
+	    int keep = 0;
+	    for(vector<attack>::iterator it = attacks.begin(); it != attacks.end(); it++)
+	      {
+		if ((it->start >= epoch && it->start <= epoch + FILE_INTERVAL) ||
+		    (it->stop >= epoch && it->stop <= epoch + FILE_INTERVAL))
+		  {
+		    cout <<pcapfile<<" file is relevant for alert at time "<<it->start<<endl;
+		    keep = 1;
+		  }
+	      }
+	    if (!keep)
+	      continue;
 	    char ebuf[256];
 	    u_char *p;
 	    struct pcap_pkthdr *h;
@@ -1129,6 +1152,7 @@ main (int argc, char *argv[])
 	  }
 	for (vector<attack>::iterator it=attacks.begin(); it != attacks.end(); it++)
 	  {
+	    cout<<" Attack at time "<<it->start<<" stop at time "<<it->stop<<" bin "<<it->bin<<endl;
 	    if (it->flows.size() > 0)
 	      {
 		/* Find a signature if it exists */
@@ -1193,7 +1217,7 @@ main (int argc, char *argv[])
 			    curoci += sit->second.oci;
 			  }
 		      }
-		    cout<<s<<"Signature "<<signature;
+		    cout<<s<<" Signature "<<signature;
 		    double rv = (double)curvol/vol;
 		    double ro = oci>0 ? (double)curoci/oci : 1;
 		    cout<<" dropped volume "<<rv<<" and oci "<<ro<<endl;

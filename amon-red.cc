@@ -131,6 +131,8 @@ long curTime = 0;
 
 unsigned int *databrick_p;	    /* databrick arrays - payload */
 int *databrick_s;	            /* databrick arrays - symmetry */
+char *tracelab = NULL;
+
 
 pthread_mutex_t critical_section_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -327,7 +329,7 @@ export_to_db (unsigned int *databrick_p, int *databrick_s, long timestamp)
   sql::Statement *stmt = con->createStatement();
   char query[256];
  
-  sprintf(query, "SELECT * from records where timestamp=%ld",timestamp);
+  sprintf(query, "SELECT * from databricks where timestamp=%ld",timestamp);
  
   sql::ResultSet* rset = stmt->executeQuery(query);
   int n = rset->rowsCount();
@@ -339,24 +341,25 @@ export_to_db (unsigned int *databrick_p, int *databrick_s, long timestamp)
 	char* token;
 	string out = rset->getString("volume");
 	unsigned int* outp = (unsigned int*) out.c_str();
-	for (int i=0;i<BRICK_DIMENSION*BRICK_DIMENSION;i++)
-	  databrick_p[i] += outp[i];
+	for (int i=0;i<BRICK_DIMENSION;i++)
+	    databrick_p[i] += outp[i];
 	out = rset->getString("symmetry");
 	int* outs = (int*) out.c_str();
-	for (int i=0;i<BRICK_DIMENSION*BRICK_DIMENSION;i++)
+	for (int i=0;i<BRICK_DIMENSION;i++)
 	  databrick_s[i] += outs[i];
       }
       try
 	{
 	  sql::PreparedStatement *pstmt;
-	  pstmt = con->prepareStatement("UPDATE records set volume=?, symmetry=? where timestamp=?");
+	  pstmt = con->prepareStatement("UPDATE databricks set volume=?, symmetry=? where timestamp=? and trace=?");
 	  pstmt->setUInt(3, timestamp);
+	  pstmt->setString(4, (const char*)tracelab);
 	  unsigned char* pChars = (unsigned char*) databrick_p;
-	  DataBuf pbuf((char*)pChars, BRICK_DIMENSION*BRICK_DIMENSION*sizeof(unsigned int));
+	  DataBuf pbuf((char*)pChars, BRICK_DIMENSION*sizeof(unsigned int));
 	  istream pstream(&pbuf);
 	  pstmt->setBlob(1,&pstream);
 	  pChars = (unsigned char*) databrick_s;
-	  DataBuf sbuf((char*)pChars, BRICK_DIMENSION*BRICK_DIMENSION*sizeof(int));
+	  DataBuf sbuf((char*)pChars, BRICK_DIMENSION*sizeof(int));
 	  istream sstream(&sbuf);
 	  pstmt->setBlob(2,&sstream);
 	  bool res = pstmt->execute();
@@ -374,17 +377,17 @@ export_to_db (unsigned int *databrick_p, int *databrick_s, long timestamp)
       try
 	{
 	  sql::PreparedStatement *pstmt;
-	  pstmt = con->prepareStatement("INSERT into records (timestamp,volume,symmetry) values (?,?,?)");
+	  pstmt = con->prepareStatement("INSERT into databricks (timestamp,volume,symmetry,trace) values (?,?,?,?)");
 	  pstmt->setUInt(1, timestamp);
-	  cout << " TIMESTAMP " << timestamp << endl;
 	  unsigned char* pChars = (unsigned char*) databrick_p;
-	  DataBuf pbuf((char*)pChars, BRICK_DIMENSION*BRICK_DIMENSION*sizeof(unsigned int));
+	  DataBuf pbuf((char*)pChars, BRICK_DIMENSION*sizeof(unsigned int));
 	  istream pstream(&pbuf);
 	  pstmt->setBlob(2,&pstream);
 	  pChars = (unsigned char*) databrick_s;
-	  DataBuf sbuf((char*)pChars, BRICK_DIMENSION*BRICK_DIMENSION*sizeof(int));
+	  DataBuf sbuf((char*)pChars, BRICK_DIMENSION*sizeof(int));
 	  istream sstream(&sbuf);
 	  pstmt->setBlob(3,&sstream);
+	  pstmt->setString(4,(const char*)tracelab);
 	  bool res = pstmt->execute();
 	  pstmt->close();
 	  delete pstmt;
@@ -616,7 +619,7 @@ intoa (unsigned int addr)
 
 void amonReprocess()
 {
-  int s_bucket = 0, d_bucket = 0;	    /* indices for the databrick */
+  int d_bucket = 0, s_bucket = 0;	    /* indices for the databrick */
   int error;
   unsigned int payload;
 
@@ -626,8 +629,7 @@ void amonReprocess()
       long time = buffer[i].time;
       int len = buffer[i].len;
       int oci = buffer[i].oci;
-      if (time != buf_time)                 /* ignore flows that are not in the current time slot */	
-	continue;
+      /* Process all flows even though they are mixed up */
       curTime = buf_time;
       if (dbTime == 0)
 	dbTime = buf_time;
@@ -636,6 +638,13 @@ void amonReprocess()
       // data to databricks in database
       if (curTime - dbTime >= interval)
 	{
+	  if ((error = pthread_mutex_lock (&time_sync_lock)))
+	    {
+	      fprintf (stderr,
+		       "Error Number %d For Acquiring Lock. FATAL ERROR. \n",
+		       error);
+	      exit (-1);
+	    }
 	  if (isready == 0)
 	    {
 	      int diff = curTime - dbTime;
@@ -649,6 +658,13 @@ void amonReprocess()
 	      dbTime = curTime;
 	      printf("Ready and done, lastTime is now %ld curTime %ld diff %d\n", dbTime, curTime, diff);
 	    }
+	  if ((error = pthread_mutex_unlock (&time_sync_lock)))
+	    {
+	      fprintf (stderr,
+		       "Error Number %d For Acquiring Lock. FATAL ERROR. \n",
+		       error);
+	      exit (-1);
+	    }
 	}
       s_bucket = sha_hash(flow.src); /* Jelena: should add  & mask */
       d_bucket = sha_hash(flow.dst); /* Jelena: should add  & mask */
@@ -661,8 +677,11 @@ void amonReprocess()
 		   error);
 	  exit (-1);
 	}
-      databrick_p[s_bucket * BRICK_DIMENSION + d_bucket] += len;	// add bytes to payload databrick
-      databrick_s[s_bucket * BRICK_DIMENSION + d_bucket] += oci;	// add oci to symmetry databrick
+      
+      databrick_p[d_bucket] += len;	// add bytes to payload databrick for dst
+      databrick_s[d_bucket] += oci;	// add oci to symmetry databrick for dst
+      databrick_s[s_bucket] -= oci;	// subtract oci from symmetry databrick for src
+      cout<<dbTime<<" flow time "<<time<<" from "<<flow.src<<":"<<flow.sport<<" "<<flow.dst<<":"<<flow.dport<<" sbuck "<<s_bucket<<" dbuck "<<d_bucket<<" len "<<len<<" oci "<<oci<<" source dbrick "<<databrick_s[s_bucket]<<" dest "<<databrick_p[d_bucket]<<" "<<databrick_s[d_bucket]<<endl;
       if ((error = pthread_mutex_unlock (&critical_section_lock)))
 	{
 	  fprintf (stderr,
@@ -735,6 +754,7 @@ amonProcessingNfdump (char* line, long time)
   flow.dport = atoi(line+delimiters[14]); // dport
   int flags = atoi(line+delimiters[19]);
   pkts = atoi(line+delimiters[21]);
+  pkts = (int)(pkts/(dur+1))+1;
   bytes = atoi(line+delimiters[22]);
   bytes = (int)(bytes/(dur+1))+1;
 
@@ -761,34 +781,23 @@ amonProcessingNfdump (char* line, long time)
       // reply, switch src and dst so it can go to the
       // right databrick
       if (flow.sport < 1024 && flow.dport >= 1024)
-	{
-	  oci = -1;
-	  unsigned int tempsrc = flow.src;
-	  flow.src = flow.dst;
-	  flow.dst = tempsrc;
-	  unsigned short tempsport = flow.sport;
-	  flow.sport = flow.dport;
-	  flow.dport = tempsport;
-	}
+	oci = -1*pkts;
       // request
       else if (flow.sport >= 1024 && flow.dport < 1024)
-	oci = 1;
-      // unknown, assume request
+	oci = 1*pkts;
+      // unknown, do nothing
       else
-	oci = 1;
+	oci = 0;
     }
   else
-    // unknown, assume request
-    // we could fix this for ICMP trafic if type.code
-    // is correct in data
-    oci=1;
+    // unknown, do nothing
+    oci=0;
   amonProcessing(flow, bytes, end, oci);
 }
 
 void
 amonProcessingPcap (struct pfring_pkthdr *h, const u_char * p, long time)
 {
-
   struct ether_header ehdr;
   u_short eth_type;
   struct ip ip;
@@ -821,20 +830,14 @@ amonProcessingPcap (struct pfring_pkthdr *h, const u_char * p, long time)
         memset((void*)&h->extended_hdr.parsed_pkt, 0, sizeof(struct pkt_parsing_info));
         pfring_parse_pkt((u_char*)p, (struct pfring_pkthdr*)h, 4, 0, 0);
       }
-	#if 0
-      		printf ("[%s:%d %d", intoa (ntohl (ip.ip_src.s_addr)),
-              	h->extended_hdr.parsed_pkt.l4_src_port, s_bucket);
-      		printf ("-> %s:%d] \n", intoa (ntohl (ip.ip_dst.s_addr)),
-              	h->extended_hdr.parsed_pkt.l4_dst_port);
-	#endif
-
 
       flow.src = src_omega;
       flow.dst = dst_omega;
       flow.sport = h->extended_hdr.parsed_pkt.l4_src_port;
       flow.dport = h->extended_hdr.parsed_pkt.l4_dst_port;
       len = h->len;
-
+      /* TODO handle OCI here */
+      
       amonProcessing(flow, len, time, 0);
     }
 }
@@ -848,6 +851,7 @@ reset_transmit (void *passed_params)
   while (1)
     {
       usleep(1000);
+
       if ((error = pthread_mutex_lock (&time_sync_lock)))
 	{
 	  fprintf (stderr,
@@ -869,26 +873,6 @@ reset_transmit (void *passed_params)
       else
 	{
 	  isready = 2;   /* signal that we have started processing what is there */
-	  // Standardize time
-	  long mongoTime = int(dbTime / interval)*interval;
-	  // Divide databrick items to get measures per second
-	  for(int i=0; i<BRICK_DIMENSION*BRICK_DIMENSION; i++)
-	    {
-	      databrick_p[i] = int(databrick_p[i]/interval);
-	      databrick_s[i] = int(databrick_s[i]/interval);
-	    }
-	  asm volatile ("":::"memory");
-	  printf ("===============%ld======================\n", dbTime);
-	  /*      Entering Critical Section     */
-	  if ((error = pthread_mutex_lock (&critical_section_lock)))
-	    {
-	      fprintf (stderr,
-		       "Error Number %d For Acquiring Lock. FATAL ERROR. \n",
-		       error);
-	      exit (-1);
-	    }
-	  
-	  
 
 	  if ((error = pthread_mutex_unlock (&time_sync_lock)))
 	    {
@@ -897,7 +881,27 @@ reset_transmit (void *passed_params)
 		       error);
 	      exit (-1);
 	    }			/*      Exiting Critical Section     */
+	  // Standardize time
+	  long mongoTime = int(dbTime / interval)*interval;
+	  // Divide databrick items to get measures per second
+	  if ((error = pthread_mutex_lock (&critical_section_lock)))
+	    {
+	      fprintf (stderr,
+		       "Error Number %d For Acquiring Lock. FATAL ERROR. \n",
+		       error);
+	      exit (-1);
+	    }
 
+	  for(int i=0; i<BRICK_DIMENSION; i++)
+	    {
+	      databrick_p[i] = int(databrick_p[i]/interval);
+	      databrick_s[i] = int(databrick_s[i]/interval);
+	    }
+	  asm volatile ("":::"memory");
+	  printf ("===============%ld======================\n", dbTime);
+	  /*      Entering Critical Section     */
+	  
+	  
 
 	  printf("\n Timestamp %ld \n",mongoTime);
 
@@ -906,9 +910,9 @@ reset_transmit (void *passed_params)
 	  export_to_db (databrick_p, databrick_s, mongoTime);
 	  /* Zero down databricks for next time */
 	  memset ((unsigned int *) databrick_p, 0,
-		  BRICK_DIMENSION * BRICK_DIMENSION * sizeof (unsigned int));
+		 BRICK_DIMENSION * sizeof (unsigned int));
 	  memset ((int *) databrick_s, 0,
-		  BRICK_DIMENSION * BRICK_DIMENSION * sizeof (unsigned int));
+		 BRICK_DIMENSION * sizeof (unsigned int));
 	  /* End of mongodb part - this should go into a function */
 
 	  
@@ -1021,7 +1025,6 @@ main (int argc, char *argv[])
 {
   delimiters = (int*)malloc(AR_LEN*sizeof(int));
   parse_config (&parms);                /* Read config file */
-
   char *devices = NULL, *dev = NULL, *tmp = NULL;
   char c, buf[32];
   u_char mac_address[6] = { 0 };
@@ -1043,7 +1046,7 @@ main (int argc, char *argv[])
   thiszone = gmt_to_local (0);
 #endif
 
-  while ((c = getopt (argc, argv, "hi:l:vsw:p:b:g:f:m:n:r:")) != '?')
+  while ((c = getopt (argc, argv, "hi:l:vsw:p:b:g:f:m:n:r:t:")) != '?')
     {
       if ((c == 255) || (c == -1))
 	break;
@@ -1060,6 +1063,9 @@ main (int argc, char *argv[])
 	case 'r':
 	  pcap_in = strdup (optarg);
 	  printf("Pcap in is %s\n", pcap_in);
+	  break;
+	case 't':
+	  tracelab = strdup (optarg);
 	  break;
 	case 's':
 	  wait_for_packet = 1;
@@ -1109,12 +1115,12 @@ main (int argc, char *argv[])
 
   /* Initialize AMON variables and structs */
   /* Define the pointers to the sketch arrays */
-  databrick_p = (unsigned int *) malloc(BRICK_DIMENSION * BRICK_DIMENSION * sizeof (unsigned int));
-  databrick_s = (int *) malloc(BRICK_DIMENSION * BRICK_DIMENSION * sizeof (unsigned int));
+  databrick_p = (unsigned int *) malloc(BRICK_DIMENSION * sizeof (unsigned int));
+  databrick_s = (int *) malloc(BRICK_DIMENSION * sizeof (unsigned int));
   memset ((unsigned int *) databrick_p, 0,
-	  BRICK_DIMENSION * BRICK_DIMENSION * sizeof (unsigned int));
+	  BRICK_DIMENSION * sizeof (unsigned int));
   memset ((int *) databrick_s, 0,
-	  BRICK_DIMENSION * BRICK_DIMENSION * sizeof (unsigned int));
+	  BRICK_DIMENSION * sizeof (unsigned int));
 
   /* Data is not ready for reading */
   isready = 0;

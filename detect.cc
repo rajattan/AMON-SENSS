@@ -45,23 +45,12 @@
 #include <cppconn/prepared_statement.h>
 #include <streambuf>
 
-#include "haship.h"
-#include "haship.c"
-#include "bm_structs.h"
+#include "utils.h"
 #include <openssl/sha.h>
 
 
 #define ATTACK_THRESH 12 /* Make this a configurable param */
 #define HIST_LEN 1000    /* How long we remember history */
-#define MAX_NUM_DEVS 64
-#define MAXLEN 128
-#define CONFIG_FILE "amon.config"
-#define VERBOSE_SUPPORT
-#define MAX_LINE 255
-#define TCP 6
-#define UDP 17
-#define BUF_SIZE 1000
-#define AR_LEN 30
 #define MIN_SAMPLES 1000
 
 sql::Connection *con;
@@ -79,6 +68,7 @@ public:
   }
 };
 
+char* trace;
 
 //====================================================//
 //===== Function to trim strings for config file =====//
@@ -115,14 +105,6 @@ char *trim(char *str)
 
     return str;
 }
-
-struct flow_p
-{
-  long time;
-  int len;
-  int oci;
-  flow_t flow;
-};
 
 int *dst[2];                /* current volume and symmetry per dst */
 int is_attack[BRICK_DIMENSION];
@@ -280,7 +262,6 @@ void update_dst_arrays()
     {
       if(!training_done)
 	{
-	  cout<<"Training is done"<<endl;
 	  training_done = 1;
 	}
       else
@@ -352,6 +333,10 @@ void detect_attack(unsigned int timestamp)
 	      is_attack[i] = 1;
 	      /* Dump records into a file */
 	      cout <<" Attack detected in destination bin " << i << " time " << timestamp << " samples "<<tot_samples<<" mean "<<avgv<<" + 5*"<< stdv<<" < "<<dst[vol][i]<<" and "<<avgs<<" +- 5*"<<stds<<" inside "<<dst[sym][i]<<" flag "<<is_attack[i]<<endl;
+	      ofstream out;
+	      out.open("alerts.txt", std::ios_base::app);
+	      out << "START "<<i<<" "<<timestamp<<endl;
+	      out.close();
 	      char filename[MAXLEN];
 	      sprintf(filename,"%d.log.%u", i, timestamp);
 	      outfiles[i].close();
@@ -382,6 +367,10 @@ void detect_attack(unsigned int timestamp)
 	    {
 	      /* Signal end of attack */
 	      cout <<" Attack has stopped in destination bin "<< i << " time " << timestamp << " samples "<<tot_samples<<endl;
+	      ofstream out;
+	      out.open("alerts.txt", std::ios_base::app);
+	      out << "STOP "<<i<<" "<<timestamp<<endl;
+	      out.close();
 	      is_attack[i] = 0;
 	    }
 	}
@@ -399,7 +388,7 @@ void read_from_db ()
   sql::Statement *stmt = con->createStatement();
   char query[256];
  
-  sprintf(query, "SELECT * from records order by timestamp asc");
+  sprintf(query, "SELECT * from databricks where trace='%s' order by timestamp asc", trace);
   sql::ResultSet* rset = stmt->executeQuery(query);
   // Read existing data, create destination array and update
   // what is there
@@ -410,13 +399,11 @@ void read_from_db ()
 	string out = rset->getString("volume");
 	unsigned int* outp = (unsigned int*) out.c_str();
 	for (int i=0;i<BRICK_DIMENSION;i++)
-	  for (int j=0;j<BRICK_DIMENSION;j++)
-	    dst[vol][i] += outp[j*BRICK_DIMENSION+i];
+	    dst[vol][i] = outp[i];
 	out = rset->getString("symmetry");
 	int* outs = (int*) out.c_str();
 	for (int i=0;i<BRICK_DIMENSION;i++)
-	  for (int j=0;j<BRICK_DIMENSION;j++)
-	    dst[sym][i] += outs[j*BRICK_DIMENSION+i];
+	    dst[sym][i] = outs[i];
 
 	if (training_done)
 	  detect_attack(timestamp);	
@@ -442,8 +429,6 @@ void read_from_db ()
 			int ao = stats[hist][avg][j][i];
 			stats[hist][avg][j][i] = stats[hist][avg][j][i] + (dst[j][i] - stats[hist][avg][j][i])/stats[hist][n][j][i];
 			stats[hist][ss][j][i] = stats[hist][ss][j][i] + (dst[j][i]-ao)*(dst[j][i] - stats[hist][avg][j][i]);
-			if (i==50 && j==sym)
-			  cout<<"Training "<<timestamp<<" avg "<<stats[hist][avg][j][i]<<" stdev "<<sqrt(stats[hist][ss][j][i]/(stats[hist][n][j][i]-1))<<" value "<<dst[j][i]<<" samples "<<stats[hist][n][j][i]<<endl;
 		      }
 		  }
 	      }
@@ -461,13 +446,38 @@ void read_from_db ()
 void
 printHelp (void)
 {
-  printf ("detect\n(C) 2017 USC/ISI.\n\n");
-  printf ("-h              Print this help\n");
+  cout << "detect\n(C) 2017 USC/ISI.\n\n";
+  cout << "-t trace\n";
+  cout << "-h              Print this help\n";
 }
 
 int main (int argc, char *argv[])
 {
+  char c;
+  int bin = sha_hash(3329081344);
+  cout << "Bin is "<<bin<<endl;
+  bin = sha_hash(1250050048);
+  cout << "Bin is "<<bin<<endl;
   parse_config (&parms);                /* Read config file */
+
+  while ((c = getopt (argc, argv, "hi:l:vsw:p:b:g:f:m:n:r:t:")) != '?')
+    {
+      if ((c == 255) || (c == -1))
+	break;
+
+      switch (c)
+	{
+	case 't':
+	  trace = strdup(optarg);
+	  break;
+	case 'h':
+	  printHelp ();
+	  return (0);
+	  break;
+	default:
+	  break;
+	}
+    }
   
   sql::Driver *driver;
   

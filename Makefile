@@ -52,8 +52,8 @@ all: ${TARGETS}
 read: read.o
 	${CC} ${CFLAGS} read.o ${LIBS} -o $@
 
-detect: detect.o
-	${CC} ${CFLAGS} detect.o ${LIBS} -o $@
+detect: detect.o utils.o
+	${CC} ${CFLAGS} detect.o utils.o ${LIBS} -o $@
 
 profile: profile.o utils.o
 	${CC} ${CFLAGS} profile.o utils.o ${LIBS} -o $@

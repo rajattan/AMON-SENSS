@@ -14,7 +14,7 @@ do
 	cnt=`ps axuw | grep amon | wc | awk '{print $1}'`
     done
     echo "Executing .. :  ./amon -r $line -m 0"
-    nohup ./amon-red -n 5 -r $line & #> out$i
+    nohup ./amon-red -n 5 -r $line -t $2 & #> out$i
 done < <(cat "./$1")
 
 end_time=$(date +%s)

@@ -5,7 +5,9 @@
 #ifndef __UTILS_H
 #define __UTILS_H
 
-#define BRICK_DIMENSION 128 
+#define FILE_INTERVAL 3600
+#define TIMEZONE_ADJUST 5*3600
+#define BRICK_DIMENSION 128*128 
 #define MAX_NUM_DEVS 64
 #define MAXLEN 128
 #define CONFIG_FILE "amon.config"
@@ -13,7 +15,7 @@
 #define MAX_LINE 255
 #define TCP 6
 #define UDP 17
-#define BUF_SIZE 1000
+#define BUF_SIZE 100
 #define AR_LEN 30
 
 struct flow_t{ 
