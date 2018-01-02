@@ -531,7 +531,6 @@ void addSample(vector<attack>::iterator it, flow_p f)
   if (toadd1 > f.len || toadd2 > abs(f.oci))
     return;
 
-  
   if (it->flows.size() < MAX_SAMPLES)
     {
       it->flows.push_back(f);
@@ -549,21 +548,22 @@ void addSample(vector<attack>::iterator it, flow_p f)
 }
 
 void
-profilerProcessing(flow_t flow, int len, long time, int oci)
+profilerProcessing(flow_t flow, int len, long start, long end, int oci)
 {
   /* Figure out if this flow is part of the flows in the attack bin
      and if yes then record its data */
   int record = 0;
   for(vector<attack>::iterator it = attacks.begin(); it != attacks.end(); it++)
     {
-      if (it->start <= time && it->start + MONITOR_INTERVAL >= time)
+      // Does the flow overlap the attack?
+      if (!(end <= it->start) && !(start >= it->stop))
 	{
 	  /* Time fits, let's check bin */
 	  int d_bucket = sha_hash(flow.dst); /* Jelena: should add  & mask */
 	  if (d_bucket == it->bin)
 	    {
 	      /* Sample this one */
-	      flow_p f={time, len, oci, flow};
+	      flow_p f={start, end, len, oci, flow};
 	      addSample(it, f);
 	    }
 	}
@@ -637,7 +637,7 @@ profilerProcessingNfdump (char* line, long time)
     // we could fix this for ICMP trafic if type.code
     // is correct in data
     oci=1;
-  profilerProcessing(flow, bytes, end, oci);
+  profilerProcessing(flow, bytes, start, end, oci);
 }
 
 void
@@ -690,7 +690,7 @@ profilerProcessingPcap (struct pfring_pkthdr *h, const u_char * p, long time)
       flow.dport = h->extended_hdr.parsed_pkt.l4_dst_port;
       len = h->len;
 
-      profilerProcessing(flow, len, time, 0);
+      profilerProcessing(flow, len, time, time, 0);
     }
 }
 

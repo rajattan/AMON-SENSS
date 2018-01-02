@@ -62,7 +62,7 @@ int main(void)
     con = driver->connect("tcp://127.0.0.1:3306", "root", "steelmysql");
     /* Connect to the MySQL test database */
     con->setSchema("amon");
-    int bricks[128*128];
+    int bricks[256];
 
     try
       {
@@ -80,7 +80,7 @@ int main(void)
 	  string out2 = rset->getString("symmetry");
 	  int* outs = (int*) out2.c_str();
 	  cout << " Time "<<tstamp<<endl;
-	  for (int i=0;i<128*128;i++)
+	  for (int i=0;i<256;i++)
 	    cout<<tstamp<<" bin="<<i<< " value is " << outv[i] <<" "<<outs[i]<< "\n";
 	  cout << endl;
 	  //rstream >> outm;

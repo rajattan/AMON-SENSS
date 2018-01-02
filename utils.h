@@ -7,7 +7,7 @@
 
 #define FILE_INTERVAL 3600
 #define TIMEZONE_ADJUST 5*3600
-#define BRICK_DIMENSION 128*128 
+#define BRICK_DIMENSION 256
 #define MAX_NUM_DEVS 64
 #define MAXLEN 128
 #define CONFIG_FILE "amon.config"
@@ -15,8 +15,14 @@
 #define MAX_LINE 255
 #define TCP 6
 #define UDP 17
-#define BUF_SIZE 100
+#define BUF_SIZE 1000
 #define AR_LEN 30
+#define AMON_PORT 1000
+#define BACKLOG 30
+#define ATTACK_THRESH 60 /* Make this a configurable param */
+#define HIST_LEN 3600    /* How long we remember history */
+#define MIN_SAMPLES 1000
+
 
 struct flow_t{ 
  u_int32_t src;
@@ -27,7 +33,8 @@ struct flow_t{
 
 struct flow_p
 {
-  long time;
+  long start;
+  long end;
   int len;
   int oci;
   flow_t flow;

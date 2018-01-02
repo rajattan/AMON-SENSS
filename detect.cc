@@ -49,10 +49,6 @@
 #include <openssl/sha.h>
 
 
-#define ATTACK_THRESH 12 /* Make this a configurable param */
-#define HIST_LEN 1000    /* How long we remember history */
-#define MIN_SAMPLES 1000
-
 sql::Connection *con;
 sql::Statement *stmt;
 sql::ResultSet *res;
@@ -454,10 +450,10 @@ printHelp (void)
 int main (int argc, char *argv[])
 {
   char c;
-  int bin = sha_hash(3329081344);
-  cout << "Bin is "<<bin<<endl;
+  int bin = sha_hash(3329021952);
+  cout << "Bin src is "<<bin<<endl;
   bin = sha_hash(1250050048);
-  cout << "Bin is "<<bin<<endl;
+  cout << "Bin dst is "<<bin<<endl;
   parse_config (&parms);                /* Read config file */
 
   while ((c = getopt (argc, argv, "hi:l:vsw:p:b:g:f:m:n:r:t:")) != '?')

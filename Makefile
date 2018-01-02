@@ -43,7 +43,7 @@ LIBS       = -lpcap -lpthread -lpfring  -lrt   -lnuma -lrt -lmongoc-1.0 -lbson-1
 #
 # Main targets
 #
-PFPROGS   = amon-red read detect profile
+PFPROGS   = amon-red amon-flow read detect profile
 
 TARGETS   = ${PFPROGS} 
 
@@ -63,6 +63,9 @@ amon:  amon.o
 
 amon-red:  amon-red.o utils.o
 	${CC} ${CFLAGS} amon-red.o utils.o ${LIBS} -o $@
+
+amon-flow:  amon-flow.o utils.o
+	${CC} ${CFLAGS} amon-flow.o utils.o ${LIBS} -o $@
 
 clean:
 	@rm -f ${TARGETS} *.o *~
