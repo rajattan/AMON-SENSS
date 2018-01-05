@@ -102,7 +102,7 @@ char *trim(char *str)
     return str;
 }
 
-int *dst[2];                /* current volume and symmetry per dst */
+int *dsts[2];                /* current volume and symmetry per dst */
 int is_attack[BRICK_DIMENSION];
 int is_abnormal[BRICK_DIMENSION]; 
 ofstream outfiles[BRICK_DIMENSION];
@@ -239,14 +239,14 @@ void update_dst_arrays()
 		  stats[cur][n][j][i] += 1;
 		  if (stats[cur][n][j][i] == 1)
 		    {
-		      stats[cur][avg][j][i] =  dst[j][i];
+		      stats[cur][avg][j][i] =  dsts[j][i];
 		      stats[cur][ss][j][i] =  0;
 		    }
 		  else
 		    {
 		      int ao = stats[cur][avg][j][i];
-		      stats[cur][avg][j][i] = stats[cur][avg][j][i] + (dst[j][i] - stats[cur][avg][j][i])/stats[cur][n][j][i];
-		      stats[cur][ss][j][i] = stats[cur][ss][j][i] + (dst[j][i]-ao)*(dst[j][i] - stats[cur][avg][j][i]);
+		      stats[cur][avg][j][i] = stats[cur][avg][j][i] + (dsts[j][i] - stats[cur][avg][j][i])/stats[cur][n][j][i];
+		      stats[cur][ss][j][i] = stats[cur][ss][j][i] + (dsts[j][i]-ao)*(dsts[j][i] - stats[cur][avg][j][i]);
 		    }		
 		}
 	    }
@@ -254,7 +254,7 @@ void update_dst_arrays()
     }
   samples++;
   tot_samples++;
-  if (samples == MIN_SAMPLES)
+  if (samples == MIN_TRAIN)
     {
       if(!training_done)
 	{
@@ -274,7 +274,7 @@ void update_dst_arrays()
     }
   // Zero down dst summaries for the next round
   for (int i=vol; i<=sym;i++)
-    memset ((int *) dst[i], 0, BRICK_DIMENSION * sizeof (int));
+    memset ((int *) dsts[i], 0, BRICK_DIMENSION * sizeof (int));
 }
 
 //=================================================================//
@@ -285,9 +285,9 @@ int abnormal(int type, int index, unsigned int timestamp)
   double mean = stats[hist][avg][type][index];
   double std = sqrt(stats[hist][ss][type][index]/(stats[hist][n][type][index]-1));
 
-  if (type == vol && dst[type][index] > mean + 5*std)
+  if (type == vol && dsts[type][index] > mean + 5*std)
     return 1;
-  else if (type == sym && (dst[type][index] > mean + 5*std || dst[type][index] < mean - 5*std))
+  else if (type == sym && (dsts[type][index] > mean + 5*std || dsts[type][index] < mean - 5*std))
     return 1;
   else
     return 0;
@@ -308,8 +308,8 @@ void detect_attack(unsigned int timestamp)
       records[ri][i].avgs = avgs;
       records[ri][i].stdv = stdv;
       records[ri][i].stds = stds;
-      records[ri][i].valv = dst[vol][i];
-      records[ri][i].vals = dst[sym][i];
+      records[ri][i].valv = dsts[vol][i];
+      records[ri][i].vals = dsts[sym][i];
 
       if (is_attack[i])
 	{
@@ -328,7 +328,7 @@ void detect_attack(unsigned int timestamp)
 	      //is_attack = 1;
 	      is_attack[i] = 1;
 	      /* Dump records into a file */
-	      cout <<" Attack detected in destination bin " << i << " time " << timestamp << " samples "<<tot_samples<<" mean "<<avgv<<" + 5*"<< stdv<<" < "<<dst[vol][i]<<" and "<<avgs<<" +- 5*"<<stds<<" inside "<<dst[sym][i]<<" flag "<<is_attack[i]<<endl;
+	      cout <<" Attack detected in destination bin " << i << " time " << timestamp << " samples "<<tot_samples<<" mean "<<avgv<<" + 5*"<< stdv<<" < "<<dsts[vol][i]<<" and "<<avgs<<" +- 5*"<<stds<<" inside "<<dsts[sym][i]<<" flag "<<is_attack[i]<<endl;
 	      ofstream out;
 	      out.open("alerts.txt", std::ios_base::app);
 	      out << "START "<<i<<" "<<timestamp<<endl;
@@ -395,11 +395,11 @@ void read_from_db ()
 	string out = rset->getString("volume");
 	unsigned int* outp = (unsigned int*) out.c_str();
 	for (int i=0;i<BRICK_DIMENSION;i++)
-	    dst[vol][i] = outp[i];
+	    dsts[vol][i] = outp[i];
 	out = rset->getString("symmetry");
 	int* outs = (int*) out.c_str();
 	for (int i=0;i<BRICK_DIMENSION;i++)
-	    dst[sym][i] = outs[i];
+	    dsts[sym][i] = outs[i];
 
 	if (training_done)
 	  detect_attack(timestamp);	
@@ -414,17 +414,17 @@ void read_from_db ()
 		    stats[hist][n][j][i] += 1;
 		    if (stats[hist][n][j][i] == 1)
 		    {
-		      stats[hist][avg][j][i] =  dst[j][i];
+		      stats[hist][avg][j][i] =  dsts[j][i];
 		      stats[hist][ss][j][i] =  0;
 		      
 		      if (i==50 && j==sym)
-			cout<<"First "<<timestamp<<" avg "<< stats[hist][avg][j][i] <<" stdev 0 value "<<dst[j][i]<<endl;
+			cout<<"First "<<timestamp<<" avg "<< stats[hist][avg][j][i] <<" stdev 0 value "<<dsts[j][i]<<endl;
 		    }
 		    else
 		      {
 			int ao = stats[hist][avg][j][i];
-			stats[hist][avg][j][i] = stats[hist][avg][j][i] + (dst[j][i] - stats[hist][avg][j][i])/stats[hist][n][j][i];
-			stats[hist][ss][j][i] = stats[hist][ss][j][i] + (dst[j][i]-ao)*(dst[j][i] - stats[hist][avg][j][i]);
+			stats[hist][avg][j][i] = stats[hist][avg][j][i] + (dsts[j][i] - stats[hist][avg][j][i])/stats[hist][n][j][i];
+			stats[hist][ss][j][i] = stats[hist][ss][j][i] + (dsts[j][i]-ao)*(dsts[j][i] - stats[hist][avg][j][i]);
 		      }
 		  }
 	      }
@@ -450,7 +450,7 @@ printHelp (void)
 int main (int argc, char *argv[])
 {
   char c;
-  int bin = sha_hash(3329021952);
+  int bin = sha_hash(1452865536);
   cout << "Bin src is "<<bin<<endl;
   bin = sha_hash(1250050048);
   cout << "Bin dst is "<<bin<<endl;
@@ -485,8 +485,8 @@ int main (int argc, char *argv[])
   /* Initialize variables and structs */
   for (int i = vol; i <= sym; i++)
     {
-      dst[i] = (int *) malloc(BRICK_DIMENSION * sizeof (int));
-      memset ((int *) dst[i], 0, BRICK_DIMENSION * sizeof (int));
+      dsts[i] = (int *) malloc(BRICK_DIMENSION * sizeof (int));
+      memset ((int *) dsts[i], 0, BRICK_DIMENSION * sizeof (int));
     }
   memset ((int *) is_attack, 0, BRICK_DIMENSION * sizeof (int));
   memset ((int *) is_abnormal, 0, BRICK_DIMENSION * sizeof (int));

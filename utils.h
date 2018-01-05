@@ -1,9 +1,13 @@
+#ifndef __UTILS_H
+#define __UTILS_H
+
 #include <openssl/sha.h>
 #include <netinet/in.h>
 #include <stdint.h>
+#include <vector>
 
-#ifndef __UTILS_H
-#define __UTILS_H
+
+using namespace std;
 
 #define FILE_INTERVAL 3600
 #define TIMEZONE_ADJUST 5*3600
@@ -17,12 +21,30 @@
 #define UDP 17
 #define BUF_SIZE 1000
 #define AR_LEN 30
-#define AMON_PORT 1000
+#define AMON_PORT 10000
 #define BACKLOG 30
 #define ATTACK_THRESH 60 /* Make this a configurable param */
 #define HIST_LEN 3600    /* How long we remember history */
-#define MIN_SAMPLES 1000
+#define MIN_TRAIN 3600
+#define NUMSTD 5
+#define MAX_SAMPLES 1000
+#define MIN_SAMPLES 2
+#define MAX_FLOW_SIZE 10000;
+#define FILTER_THRESH 0.3
+#define MAX_DIFF 10
+#define BIG_MSG 100000
 
+enum stype{src, dst, sport, dport, dstdport, srcsport, srcdst, dstsport};
+
+struct sig{
+  int bin;
+  string signature;
+};
+
+struct indic{
+  int bin;
+  long timestamp;
+};
 
 struct flow_t{ 
  u_int32_t src;
@@ -40,6 +62,18 @@ struct flow_p
   flow_t flow;
 };
 
+struct stat_r
+{
+  int vol;
+  int oci;
+};
+
+struct sample
+{
+  vector<flow_p> flows;
+  string signature;
+};
+  
 int sha_hash(u_int32_t ip);
 
 #endif

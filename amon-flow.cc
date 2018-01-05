@@ -1,4 +1,4 @@
-//================================================================================//
+ //================================================================================//
 //================================================================================//
 /*
  *
@@ -32,6 +32,7 @@
 #include <sched.h>
 #include <stdlib.h>
 #include <sys/types.h>
+#include <sys/select.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <string.h>
@@ -76,6 +77,13 @@ sql::Connection *con;
 sql::Statement *stmt;
 sql::ResultSet *res;
 int interval=3;
+int reporters=0;
+int reported=0;
+fd_set readset, writeset;
+
+int isready;
+long dbTime = 0;
+long curTime = 0;
 
 
 char* server = NULL;
@@ -112,7 +120,6 @@ void parse(char* input, char delimiter, int** array)
 long buf_time = 0;
 int buf_cnt = 0;
 int buf_i = 0;
-struct flow_p buffer[BUF_SIZE];
 pfring *pd[MAX_NUM_DEVS];
 struct pollfd pfd[MAX_NUM_DEVS];
 int num_devs = 0;
@@ -130,24 +137,29 @@ int poll_duration = DEFAULT_POLL_DURATION;
 //==== Declare AMON-related variables====//
 //=======================================//
 
-int isready;
-long dbTime = 0;
-long curTime = 0;
-
 struct cell
 {
   unsigned int databrick_p[BRICK_DIMENSION];	 /* databrick payload */
   int databrick_s[BRICK_DIMENSION];	         /* databrick symmetry */
 };
 
+
+vector <flow_p> pool[BRICK_DIMENSION];            /* for attack signatures */
+struct indic indicators[BRICK_DIMENSION];         /* to signal when there is an attack */
+int ii=0;
+
 map<long,cell> cells;
 map<int,long> lasttime;
+map<long,map<int, sample>> samples;
 long smallesttime = 0;
+long firsttime = 0;
 long updatetime = 0;
+long statstime = 0;
 int traceid = 0;
 
 
 pthread_mutex_t critical_section_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t indicator_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* Make sure we don't fire if data is not ready */
 pthread_mutex_t time_sync_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -155,13 +167,13 @@ pthread_mutex_t time_sync_lock = PTHREAD_MUTEX_INITIALIZER;
 
 struct passingThreadParams
 {
-        int caller_id;
-        int callee_id;
+  int caller_id;
+  int callee_id;
 };
 
 
-struct conf_param {
-
+struct conf_param
+{
   int alarm_sleep;
   int default_snaplen;
   char default_device[MAXLEN];
@@ -176,6 +188,7 @@ struct conf_param {
 }
 conf_param;
 struct conf_param parms;
+
 
 
 //====================================================//
@@ -332,6 +345,153 @@ long *string_to_long_array(char *input, long *level)
     return array;
 }
 
+void addToSig(string& sig, int type, string key, double vol, double oci)
+{
+  string filter = "";
+  switch(type)
+    {
+    case src:
+      filter = "src";
+      break;
+    case dst:
+      filter = "dst";
+      break;
+    case sport:
+      filter = "sport";
+      break;
+    case dport:
+      filter = "dport";
+      break;
+    default:
+      break;
+    }
+  if (filter != "")
+    sig += (filter + "=" + key);
+  else
+    {
+      string filter1, filter2;
+      switch(type)
+	{
+	case srcsport:
+	  filter1 = "src";
+	  filter2 = "sport";
+	  break;
+	case dstdport:
+	  filter1 = "dst";
+	  filter2 = "dport";
+	  break;
+	case srcdst:
+	  filter1 = "src";
+	  filter2 = "dst";
+	  break;
+	case dstsport:
+	  filter1 = "dst";
+	  filter2 = "sport";
+	  break;
+	default:
+	  break;
+	}
+      int colon = key.find(":");
+      string key1 = key.substr(0,colon);
+      string key2 = key.substr(colon+1);
+      sig += (filter1 + "=" + key1 + " and " + filter2 + "=" + key2);
+    }
+  sig += (" vol " + to_string(vol) + " oci " + to_string(oci));
+}
+
+
+string getSignature(long timestamp, int index)
+{
+  int diff = MAX_DIFF;
+  long timeinmap = 0;
+  long t = timestamp;
+  if (samples.find(timestamp) == samples.end())
+    {
+      for (map<long,map<int,sample>>::iterator it = samples.begin(); it != samples.end(); it++)
+	{
+	  if (abs(it->first - timestamp) < diff)
+	    {
+	      timeinmap = it->first;
+	      diff = abs(it->first - timestamp);
+	    }
+	}
+      if (timeinmap == 0)
+	return "";
+      else
+	t = timeinmap;
+    }
+  if (samples[t][index].flows.size() >= MIN_SAMPLES)
+    {
+      /* Find a signature if it exists */
+      map <string,stat_r> sigs[8];
+      int vol = 0;
+      int oci = 0;
+      for (vector<flow_p>::iterator fit = samples[t][index].flows.begin(); fit != samples[t][index].flows.end(); fit++)
+	{
+	      flow_p f = *fit;
+	      vol += f.len;
+	      oci += f.oci;
+	      for (int s=src; s<=dstsport; s++)
+		{
+		  string key;
+		  switch(s)
+		    {
+		    case src:
+		      key = to_string(f.flow.src);
+		      break;
+		    case sport:
+		      key = to_string(f.flow.sport);
+		      break;
+		    case dst:
+		      key = to_string(f.flow.dst);
+		      break;
+		    case dport:
+		      key = to_string(f.flow.dport);
+		      break;
+		    case dstdport:
+		      key = to_string(f.flow.dst)+":"+to_string(f.flow.dport);
+		      break;
+		    case srcsport:
+		      key = to_string(f.flow.src)+":"+to_string(f.flow.sport);
+		      break;
+		    case srcdst:
+		      key = to_string(f.flow.src)+":"+to_string(f.flow.dst);
+		      break;
+		    case dstsport:
+		      key = to_string(f.flow.dst)+":"+to_string(f.flow.sport);
+		      break;
+		    default:
+		      break;
+		    }
+		  if (sigs[s].find(key) == sigs[s].end())
+		    sigs[s][key] = {0,0};
+		  sigs[s][key].vol += f.len;
+		  sigs[s][key].oci += f.oci;
+		}
+	    }
+	  for (int s=src; s<=dstsport; s++)
+	    {
+	      int curvol = 0;
+	      int curoci = 0;
+	      string signature="";
+	      for (map<string,stat_r>::iterator sit=sigs[s].begin(); sit != sigs[s].end(); sit++)
+		{
+		  if (sit->second.vol > vol * FILTER_THRESH)
+		    {
+		      double coci =  oci>0 ? (double)sit->second.oci/oci : 1;
+		      addToSig(signature, s, sit->first, (double)sit->second.vol/vol, coci);
+		      curvol += sit->second.vol;
+		      curoci += sit->second.oci;
+		    }
+		}
+	      double rv = (double)curvol/vol;
+	      double ro = oci>0 ? (double)curoci/oci : 1;
+	      return signature;
+	    }
+    }
+}
+
+
 //==========================================================//
 //=================== Export Databricks to DB ==============//
 //==========================================================//
@@ -380,31 +540,77 @@ export_to_db (long timestamp)
 	{
 	  perror("connect failed. Error");
 	}
+      char OK[3];
+      // Wait for server to be ready
+      recv(sockfd, OK, 3, 0);
     }
       
   // Go through cells and see which ones are ready. These are the ones that are
   // less than timestamp
   
-  for (map<long,cell>::iterator it=cells.begin(); it != cells.end(); )
-    {
-      if (it->first >= timestamp)
+  do{
+    FD_CLR(sockfd, &readset);
+    FD_CLR(sockfd, &writeset);
+    FD_SET(sockfd, &readset);
+    FD_SET(sockfd, &writeset);
+  } while(select(sockfd + 1, &readset, &writeset, NULL, NULL) == -1);
+  
+  /* Am I ready to read or to write? */
+  if (FD_ISSET(sockfd, &readset)) {
+    /* Got a message from socket, let's see what it is */
+    char message[BRICK_DIMENSION*sizeof(int)];
+    int n = recv(sockfd, message, BRICK_DIMENSION*sizeof(int), 0);
+    indic* attacks_detected = (indic*) message;
+    //struct sig sigs[BRICK_DIMENSION];
+    int si = 0;
+    int len = 0;
+    for (int i=0;i<n/sizeof(indic); i++)
+      {
+	cout<<"Attack detected in bin "<<attacks_detected[i].bin
+	    <<" at time "<<attacks_detected[i].timestamp<<endl;
+	string signature = getSignature(attacks_detected[i].timestamp, attacks_detected[i].bin);
+	//sigs[si].bin =  attacks_detected[i].bin;
+	//len += sizeof(int);
+	//sigs[si].signature = signature;
+	//len += signature.size();
+      }
+    /* Now send signatures to the server for each attack 
+    char* sigmsg = (char*) malloc(len+1);
+    sigmsg[0] = 'S';
+    memcpy(sigmsg+1,(char*) sigs, len);
+    if(send(sockfd, sigmsg, len, 0) < 0)
+      {
+	perror("Send failed : ");
+	return;
+      }
+    */
+  }
+  else if (FD_ISSET(sockfd, &writeset)) {
+    
+    for (map<long,cell>::iterator it=cells.begin(); it != cells.end(); )
+      {
+	if (it->first >= timestamp)
 	{
 	  return;
 	}
-      int expected_size = sizeof(int)+
-	sizeof(long)+BRICK_DIMENSION*(sizeof(unsigned int)+sizeof(int));
-      unsigned char* message = (unsigned char*) malloc(expected_size);
-      memcpy(message, (unsigned char*)&traceid, sizeof(int));
-      memcpy(message+sizeof(int), (unsigned char*)&it->first, sizeof(long));
-      memcpy(message+sizeof(int)+sizeof(long), (unsigned char*) it->second.databrick_p, BRICK_DIMENSION*sizeof(unsigned int));
-      memcpy(message+sizeof(int)+sizeof(long)+BRICK_DIMENSION*sizeof(unsigned int), (unsigned char*) it->second.databrick_s, BRICK_DIMENSION*sizeof(int));
-      if(send(sockfd, message, expected_size, 0) < 0)
-	{
-	  perror("Send failed : ");
-	  return;
-	}
-      cells.erase(it++);
-    }
+	cout<<it->first<<" bin 191 "<<cells[it->first].databrick_p[191]<<" "<<
+	  cells[it->first].databrick_s[191]<<endl;
+	int expected_size = sizeof(int)+
+	  sizeof(long)+BRICK_DIMENSION*(sizeof(unsigned int)+sizeof(int));
+	unsigned char* message = (unsigned char*) malloc(expected_size);
+	//message[0] = 'R';
+	memcpy(message, (unsigned char*)&traceid, sizeof(int));
+	memcpy(message+sizeof(int), (unsigned char*)&it->first, sizeof(long));
+	memcpy(message+sizeof(int)+sizeof(long), (unsigned char*) it->second.databrick_p, BRICK_DIMENSION*sizeof(unsigned int));
+	memcpy(message+sizeof(int)+sizeof(long)+BRICK_DIMENSION*sizeof(unsigned int), (unsigned char*) it->second.databrick_s, BRICK_DIMENSION*sizeof(int));
+	if(send(sockfd, message, expected_size, 0) < 0)
+	  {
+	    perror("Send failed : ");
+	    return;
+	  }
+	cells.erase(it++);
+      }
+  }
 }
 
 /******************************************************************/
@@ -616,7 +822,46 @@ intoa (unsigned int addr)
 
   return (_intoa (addr, buf, sizeof (buf)));
 }
+
+
+
 /*****************************************************************/
+
+void addSample(int index, flow_p f)
+{
+  /* Decide based on flow size and asymmetry if to add it or not */
+  int toadd = rand() % MAX_FLOW_SIZE;
+    /* Add asymmetric flows, and add longer flows before shorter ones */
+  if (toadd > f.len || f.oci == 0)
+    return;
+
+  for (int i = f.start; i <= f.end; i++)
+    {
+      if (samples.find(i) == samples.end())
+	{
+	  map<int,sample> m;
+	  samples.insert(pair<long,map<int,sample>>(i,m));
+	}
+      if (samples[i].find(index) == samples[i].end())
+	{
+	  sample s;
+	  samples[i].insert(pair<int,sample>(index,s));
+	}
+      if (samples[i][index].flows.size() < MAX_SAMPLES)
+	{
+	  samples[i][index].flows.push_back(f);
+	}
+      else
+	{
+	  /* Replace the flow you have already if this one is 
+	     bigger or more asymmetric */
+	  int j = rand() % MAX_SAMPLES;
+	  if ((abs(samples[i][index].flows[j].oci) < abs(f.oci)) ||
+	      (samples[i][index].flows[j].len < f.len))
+	    samples[i][index].flows[j] = f;
+	}
+    }
+}
 
 
 /*****************************************************************/
@@ -672,6 +917,9 @@ amonProcessing(flow_t flow, int len, long start, long end, int oci)
 	  //cout<<"Inserted cell for "<<i<<endl;
 	  cells.insert(pair<long,cell>(i,c));
 	}
+      flow_p f={start, end, len, oci, flow};
+	
+      addSample(d_bucket, f);
       //cout<<i<<"prev src bucket "<<s_bucket<<" oci "<<cells[i].databrick_s[s_bucket]<<" dst bucket "<<d_bucket<<" len "<<cells[i].databrick_p[d_bucket]<<" oci "<<cells[i].databrick_s[d_bucket] <<endl;
       cells[i].databrick_p[d_bucket] += len;	// add bytes to payload databrick for dst
       cells[i].databrick_s[d_bucket] += oci;	// add oci to symmetry databrick for dst
@@ -804,10 +1052,12 @@ amonProcessingPcap (struct pfring_pkthdr *h, const u_char * p, long time)
     }
 }
 
-int *dst[2];                /* current volume and symmetry per dst */
+
+ofstream debug[BRICK_DIMENSION];
 int is_attack[BRICK_DIMENSION];
 int is_abnormal[BRICK_DIMENSION]; 
 ofstream outfiles[BRICK_DIMENSION];
+
 
 /* Types of statistics. If this changes, update the entire section */
 enum period{cur, hist};
@@ -831,13 +1081,9 @@ struct record
 record records[HIST_LEN][BRICK_DIMENSION];
 int ri=0;
 
-/* This is just for rounds of moving current measures to past */
-int samples = 0;
-int tot_samples = 0;
-
 
 //=================================================================//
-//===== Function to detect values higher than mean + 5 * stdev ====//
+//===== Function to detect values higher than mean + NUMSTD * stdev ====//
 //=================================================================//
 int abnormal(int type, int index, unsigned int timestamp)
 {
@@ -848,12 +1094,10 @@ int abnormal(int type, int index, unsigned int timestamp)
     data = cells[timestamp].databrick_p[index];
   else
     data = cells[timestamp].databrick_s[index];
-  if (index == 191)
-    cout<<"191 mean "<<mean<<" stdev "<<std<<" value "<<data<<endl;
-  
-  if (type == vol && data > mean + 5*std)
+
+  if (type == vol && data > mean + NUMSTD*std)
     return 1;
-  else if (type == sym && (data > mean + 5*std || data < mean - 5*std))
+  else if (type == sym && (data > mean + NUMSTD*std || data < mean - NUMSTD*std))
     return 1;
   else
     return 0;
@@ -861,7 +1105,7 @@ int abnormal(int type, int index, unsigned int timestamp)
 
 void detect_attack(long timestamp)
 {
-  if (timestamp >= smallesttime)
+  if (timestamp >= smallesttime || timestamp <= updatetime)
     return;
   for (int i=0;i<BRICK_DIMENSION;i++)
     {
@@ -878,6 +1122,11 @@ void detect_attack(long timestamp)
       records[ri][i].valv = cells[timestamp].databrick_p[i];
       records[ri][i].vals = cells[timestamp].databrick_s[i];
 
+      debug[i] <<records[ri][i].timestamp<<" "<<records[ri][i].avgv<<" ";
+      debug[i] <<records[ri][i].stdv<<" "<<records[ri][i].valv<<" ";
+      debug[i] <<records[ri][i].avgs<<" "<<records[ri][i].stds<<" ";
+      debug[i] <<records[ri][i].vals<<" "<<is_attack[i]<<endl;
+      
       if (is_attack[i])
 	{
 	  outfiles[i] <<records[ri][i].timestamp<<" "<<records[ri][i].avgv<<" ";
@@ -887,27 +1136,46 @@ void detect_attack(long timestamp)
 	}
       if (training_done && abnormal(vol, i, timestamp) && abnormal(sym, i, timestamp))
 	{
-	  if (!is_attack[i])
-	    {
-	      is_abnormal[i] ++;
-	      cout<<"******* ABNORMAL index "<<i<<" "<<is_abnormal[i]<<endl;
-	    }
-	  if (is_abnormal[i] > ATTACK_THRESH && is_attack[i] == 0)
+	  is_abnormal[i] ++;
+	  int v=cells[timestamp].databrick_p[i];
+	  int s=cells[timestamp].databrick_s[i];
+	  cout<<timestamp<<"  abnormal for index "<<i<<" is abnormal "<<is_abnormal[i]<<" vol "<<v<<" sym "<<s<<endl;
+	  if (is_abnormal[i] >= int(ATTACK_THRESH/interval)
+	      && is_attack[i] == 0)
 	    {
 	      /* Signal attack detection */
-	      //is_attack = 1;
 	      is_attack[i] = 1;
+	      /* Update indicators */
+	      int error;
+	      if ((error = pthread_mutex_lock (&indicator_lock)))
+		{
+		  fprintf (stderr,
+			   "Error Number %d For Acquiring Lock. FATAL ERROR. \n",
+			   error);
+		  exit (-1);
+		}
+	      indicators[ii].bin=i;
+	      indicators[ii].timestamp=timestamp;
+	      ii++;
+	      if ((error = pthread_mutex_unlock (&indicator_lock)))
+		{
+		  fprintf (stderr,
+			   "Error Number %d For Releasing Lock. FATAL ERROR. \n",
+			   error);
+		  exit (-1);
+		}
+	      cout <<" Attack detected in destination bin " << i << " time " << timestamp <<" mean "<<avgv<<" + 5*"<< stdv<<" < "<<cells[timestamp].databrick_p[i]<<" and "<<avgs<<" +- 5*"<<stds<<" inside "<<cells[timestamp].databrick_s[i]<<" flag "<<is_attack[i]<<endl;
 	      /* Dump records into a file */
-	      cout <<" Attack detected in destination bin " << i << " time " << timestamp << " samples "<<tot_samples<<" mean "<<avgv<<" + 5*"<< stdv<<" < "<<cells[timestamp].databrick_p[i]<<" and "<<avgs<<" +- 5*"<<stds<<" inside "<<cells[timestamp].databrick_s[i]<<" flag "<<is_attack[i]<<endl;
 	      ofstream out;
 	      out.open("alerts.txt", std::ios_base::app);
-	      out << "START "<<i<<" "<<timestamp<<endl;
+	      float volume = float(cells[timestamp].databrick_p[i])*8/1024/1024/1024;
+	      out << "START "<<i<<" "<<timestamp<<" vol "<<volume<<" Gbps"<<endl;
 	      out.close();
 	      char filename[MAXLEN];
 	      sprintf(filename,"%d.log.%u", i, timestamp);
 	      outfiles[i].close();
 	      outfiles[i].open(filename);
-	      for (int j = ri+1; j != ri; j++)
+	      for (int j = (ri+1)%HIST_LEN; j != ri; )
 		{
 		  if (records[j][i].timestamp > 0)
 		    {
@@ -915,24 +1183,30 @@ void detect_attack(long timestamp)
 			  outfiles[i] <<records[j][i].stdv<<" "<<records[j][i].valv<<" ";
 			  outfiles[i] <<records[j][i].avgs<<" "<<records[j][i].stds<<" ";
 			  outfiles[i] <<records[j][i].vals<<" 0"<<endl;
-			}
-		      if (j == HIST_LEN)
-			j = 0;
 		    }
-		  outfiles[i] <<records[ri][i].timestamp<<" "<<records[ri][i].avgv<<" ";
-		  outfiles[i] <<records[ri][i].stdv<<" "<<records[ri][i].valv<<" ";
-		  outfiles[i] <<records[ri][i].avgs<<" "<<records[ri][i].stds<<" ";
-		  outfiles[i] <<records[ri][i].vals<<" 1"<<endl;
+		  j++;
+		  if (j == HIST_LEN)
+		    j = 0;
 		}
+	      outfiles[i] <<records[ri][i].timestamp<<" "<<records[ri][i].avgv<<" ";
+	      outfiles[i] <<records[ri][i].stdv<<" "<<records[ri][i].valv<<" ";
+	      outfiles[i] <<records[ri][i].avgs<<" "<<records[ri][i].stds<<" ";
+	      outfiles[i] <<records[ri][i].vals<<" 1"<<endl;
+	    }
 	}
       else if (training_done && !abnormal(vol, i, timestamp) && !abnormal(sym, i, timestamp))
 	{
 	  if (is_abnormal[i] > 0)
-	    is_abnormal[i] --;
+	    {
+	      is_abnormal[i] --;
+	      int v=cells[timestamp].databrick_p[i];
+	      int s=cells[timestamp].databrick_s[i];
+	      cout<<timestamp<<" NOT abnormal for index "<<i<<" for volume "<<v<<" for sym "<<s<<" is abnormal "<<is_abnormal[i]<<endl;
+	    }
 	  if (is_attack[i] > 0 && is_abnormal[i] == 0)
 	    {
 	      /* Signal end of attack */
-	      cout <<" Attack has stopped in destination bin "<< i << " time " << timestamp << " samples "<<tot_samples<<endl;
+	      cout <<" Attack has stopped in destination bin "<< i << " time " << timestamp << endl;
 	      ofstream out;
 	      out.open("alerts.txt", std::ios_base::app);
 	      out << "STOP "<<i<<" "<<timestamp<<endl;
@@ -953,7 +1227,6 @@ void update_dst_arrays(long timestamp)
     {
       return;
     }
-  cout << "Update for "<<timestamp<<" smallest "<<smallesttime<<endl;
   if (training_done)
     {
       for (int i=0;i<BRICK_DIMENSION;i++)
@@ -986,26 +1259,17 @@ void update_dst_arrays(long timestamp)
 	}
       updatetime = timestamp;
     }
-  samples++;
-  tot_samples++;
-  cout<<" Samples "<<samples<<" training done "<<training_done<<endl;
-  if (samples == MIN_SAMPLES)
+  if (timestamp - statstime >= MIN_TRAIN && training_done)
     {
-      if(!training_done)
-	{
-	  training_done = 1;
-	}
-      else
-	{
-	  for (int j = n; j <= ss; j++)
-	    for (int k = vol; k <= sym; k++)
-	      {
-		// Move cur arrays into hist and zero down cur
-		memcpy (stats[hist][j][k], stats[cur][j][k], BRICK_DIMENSION * sizeof (double));
-		memset ((double*)stats[cur][j][k], 0, BRICK_DIMENSION * sizeof (double));
-	      }
-	}
-      samples = 0;
+      statstime = timestamp;
+      cout<<"========================> Updating means "<<endl;
+      for (int j = n; j <= ss; j++)
+	for (int k = vol; k <= sym; k++)
+	  {
+	    // Move cur arrays into hist and zero down cur
+	    memcpy (stats[hist][j][k], stats[cur][j][k], BRICK_DIMENSION * sizeof (double));
+	    memset ((double*)stats[cur][j][k], 0, BRICK_DIMENSION * sizeof (double));
+	  }
     }
 }
 
@@ -1019,7 +1283,9 @@ reset_transmit (void *passed_params)
       sleep(1);
       if (is_server)
 	{
-	  cout<<"Reset "<<endl;
+	  int diff = smallesttime - statstime;
+
+	  cout<<"Reset "<<training_done<<" smallesttime "<<smallesttime<<" stats "<<statstime<<" diff "<<diff<<endl;
 	  if (!training_done)
 	    {
 	      // Find timestamps smaller than the smallest one
@@ -1053,9 +1319,15 @@ reset_transmit (void *passed_params)
 				}
 			    }
 			}
-		      cout<<"Came here "<<endl;
 		      update_dst_arrays(it->first);
 		    }
+		}
+	      int diff = smallesttime - firsttime;
+	      cout<<"Diff "<<diff<<endl;
+	      if(diff > MIN_TRAIN)
+		{
+		  training_done = 1;
+		  statstime = smallesttime;
 		}
 	    }
 	  else
@@ -1074,11 +1346,6 @@ reset_transmit (void *passed_params)
 	}
       else
 	{
-	  // Standardize time
-	  long mongoTime = int(dbTime / interval)*interval;
-	  printf("\n Timestamp %ld \n",mongoTime);
-      
-	  cout<<"Exporting, map size "<<cells.size()<<" time "<<mongoTime<<endl;
 	  int error;
 	  if ((error = pthread_mutex_lock (&critical_section_lock)))
 	    {
@@ -1087,8 +1354,15 @@ reset_transmit (void *passed_params)
 		       error);
 	      exit (-1);
 	    }
-	  
+	  // Standardize time
+	  long mongoTime = int(dbTime / interval)*interval;
+	  printf("\n Timestamp %ld \n",mongoTime);
+      
+	  cout<<"Exporting, map size "<<cells.size()<<" time "<<mongoTime<<endl;
+
+	  // Calculate signatures if any
 	  export_to_db (mongoTime);
+	  
 	  buf_time = 0;
 	  if ((error = pthread_mutex_unlock (&critical_section_lock)))
 	    {
@@ -1201,47 +1475,117 @@ void *connection_handler(void *newsock)
   int read_size;
   int expected_size = sizeof(int)+sizeof(long)+
     BRICK_DIMENSION*(sizeof(unsigned int)+sizeof(int));
-  char *message = (char*) malloc(expected_size);
+  char message[BIG_MSG];
 
+  while(!isready)
+    {
+      sleep(1);
+    }
+  //Send a GO message to client
+  sprintf(message,"%s","GO");
+  if(send(sock, message, strlen(message), 0) < 0)
+    {
+      perror("Send failed : ");
+      return 0;
+    }
+  else
+    {
+      cout<<"Sock "<<sock<<" sent message to client\n";
+    }
   //Receive a message from client
   while((read_size = recv(sock, message, expected_size, 0)) > 0 )
     {
-      int traceid;
-      long timestamp;
-      memcpy((unsigned char*) &traceid, message, sizeof(int));
-      memcpy((unsigned char*) &timestamp, message+sizeof(int), sizeof(long));
-      cell c;
-      memcpy(c.databrick_p, message+sizeof(int)+sizeof(long),
-	     BRICK_DIMENSION*sizeof(unsigned int));
-      memcpy(c.databrick_s, message+sizeof(int)+sizeof(long)
-	     +BRICK_DIMENSION*sizeof(unsigned int),
-	     BRICK_DIMENSION*sizeof(int));
-      if (lasttime.find(traceid) == lasttime.end())
-	lasttime[traceid] = 0;
-      if (timestamp > lasttime[traceid])
+      // Is this a signature message or report?
+      if (0) //message[0] == 'S')
 	{
-	  lasttime[traceid] = timestamp;
-	  smallesttime = timestamp;
-	  for (map<int,long>::iterator lt=lasttime.begin(); lt != lasttime.end(); lt++)
+	  cout<<" Got signature message "<<endl;
+	  struct sig sigs[BRICK_DIMENSION];
+	  memcpy(sigs,message+1, read_size);
+	  int i = 0;
+	  int si = 0;
+	  while (i < read_size)
 	    {
-	      if (lt->second < smallesttime)
-		smallesttime = lt->second;
+	      cout << "For bin "<<sigs[si].bin<<" signature "<<sigs[si].signature;
+	      i += (sizeof(int)+sigs[si].signature.size());
+	      si++;
 	    }
-	  cout<<"Smallest time "<<smallesttime<<endl;
-	}
-      if (cells.find(timestamp) == cells.end())
-	{
-	  //cout<<"Inserted cell for "<<timestamp<<endl;
-	  cells.insert(pair<long,cell>(timestamp,c));
 	}
       else
-	for(int i=0; i<BRICK_DIMENSION;i++)
-	  {
-	    cells[timestamp].databrick_p[i] += c.databrick_p[i];
-	    cells[timestamp].databrick_s[i] += c.databrick_s[i];
-	  }
+	{
+	  int traceid;
+	  long timestamp;
+	  memcpy((unsigned char*) &traceid, message, sizeof(int));
+	  memcpy((unsigned char*) &timestamp, message+sizeof(int), sizeof(long));
+	  cout<<" Got report message, reporter "<<traceid<<" time "<<timestamp<<endl;
+	  cell c;
+	  memcpy(c.databrick_p, message+sizeof(int)+sizeof(long),
+		 BRICK_DIMENSION*sizeof(unsigned int));
+	  memcpy(c.databrick_s, message+sizeof(int)+sizeof(long)
+		 +BRICK_DIMENSION*sizeof(unsigned int),
+		 BRICK_DIMENSION*sizeof(int));
+	  if (lasttime.find(traceid) == lasttime.end())
+	    lasttime[traceid] = 0;
+	  if (timestamp > lasttime[traceid])
+	    {
+	      lasttime[traceid] = timestamp;
+	      if (firsttime == 0)
+		firsttime = timestamp;
+	      smallesttime = timestamp;
+	      for (map<int,long>::iterator lt=lasttime.begin(); lt != lasttime.end(); lt++)
+		{
+		  if (lt->second < smallesttime)
+		    smallesttime = lt->second;
+		}
+	      int diff = smallesttime - firsttime;
+	      cout<<"Smallest time "<<smallesttime<<" first time "<<firsttime<<" diff "<<diff<<endl;
+	    }
+	  if (cells.find(timestamp) == cells.end())
+	    {
+	      //cout<<"Inserted cell for "<<timestamp<<endl;
+	      cells.insert(pair<long,cell>(timestamp,c));
+	    }
+	  else
+	    for(int i=0; i<BRICK_DIMENSION;i++)
+	      {
+		cells[timestamp].databrick_p[i] += c.databrick_p[i];
+		cells[timestamp].databrick_s[i] += c.databrick_s[i];
+		if (i == 191)
+		  cout<<timestamp<<" for 191 "<<cells[timestamp].databrick_p[i]<<" "<<cells[timestamp].databrick_s[i]<<endl;
+	      }
+	  /* See if there is an attack, we should ask the client for signature */
+	  if (ii > 0)
+	    {
+	      int error;
+	      if ((error = pthread_mutex_lock (&indicator_lock)))
+		{
+		  fprintf (stderr,
+			   "Error Number %d For Acquiring Lock. FATAL ERROR. \n",
+			   error);
+		  exit (-1);
+		}
+	      
+	      // get indicators in message and send out
+	      char* im = (char*) indicators;
+	      if(send(sock, im, ii*sizeof(indic), 0) < 0)
+		{
+		  perror("Send failed : ");
+		  return 0;
+		}
+	      ii = 0;
+	      
+	      if ((error = pthread_mutex_unlock (&indicator_lock)))
+		{
+		  fprintf (stderr,
+			   "Error Number %d For Releasing Lock. FATAL ERROR. \n",
+			   error);
+		  exit (-1);
+		}
+	    }
+	}
+      usleep(1);
     }
-  cout<<"Closing socket "<<sock<<endl;
+  reported--;
+  cout<<"Closing socket "<<sock<<" reporters now "<<reported<<endl;
   close(sock);
   return 0;
 }
@@ -1272,13 +1616,16 @@ main (int argc, char *argv[])
   thiszone = gmt_to_local (0);
 #endif
 
-  while ((c = getopt (argc, argv, "hi:l:vsw:p:b:g:f:m:n:r:t:c:")) != '?')
+  while ((c = getopt (argc, argv, "hi:l:vsw:p:b:g:f:m:n:r:t:c:a:")) != '?')
     {
       if ((c == 255) || (c == -1))
 	break;
 
       switch (c)
 	{
+	case 'a':
+	  reporters=atoi(optarg);
+	  break;
 	case 'n':
 	  interval=atoi(optarg);
 	  break;
@@ -1345,6 +1692,13 @@ main (int argc, char *argv[])
   /* Is this client or server */
   if (is_server)
     {
+      for (int i = 0; i < BRICK_DIMENSION; i++)
+	{
+	  char filename[MAXLEN];
+	  sprintf(filename,"%d.debug", i);
+	  debug[i].open(filename);
+	}
+      
       retstatus =
 	pthread_create (&thread_id, NULL, reset_transmit, NULL);
       if (retstatus)
@@ -1393,7 +1747,10 @@ main (int argc, char *argv[])
 	      exit(EXIT_FAILURE);
 	    }
 	  smallesttime = 0;
-	  cout<<"Accepted at address "<<address.sin_addr.s_addr<<endl;
+	  reported++;
+	  cout<<"Accepted at address "<<address.sin_addr.s_addr<<" reporters "<<reporters<<" reported "<<reported<<endl;
+	  if (reported == reporters)
+	    isready = 1;
 	  if(pthread_create( &thread_id, NULL,  connection_handler, (void*) &newsock) < 0)
 	    {
 	      perror("could not create thread");

@@ -72,10 +72,6 @@ using namespace std;
 #include "pfutils.c"
 #include "utils.h"
 
-#define MAX_SAMPLES 1000
-#define MAX_FLOW_SIZE 40000;
-#define MONITOR_INTERVAL 10 /* Monitor for 10 seconds */
-#define FILTER_THRESH 0.3
 
 int* delimiters;
 sql::Connection *con;
@@ -112,13 +108,6 @@ void parse(char* input, char delimiter, int** array)
 }
 
 
-struct stat_r
-{
-  int vol;
-  int oci;
-};
-
-
 bool mysort (pair<int,string> i,pair<int,string> j) { return (i.first < j.first); }
 
 
@@ -138,8 +127,6 @@ static struct timeval startTime;
 unsigned long long numPkts = 0, numBytes = 0;
 u_int8_t wait_for_packet = 0, do_shutdown = 0;
 int poll_duration = DEFAULT_POLL_DURATION;
-
-enum stype{src, dst, sport, dport, dstdport, srcsport, srcdst, dstsport};
 
 struct attack
 {
