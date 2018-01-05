@@ -36,9 +36,33 @@ using namespace std;
 
 enum stype{src, dst, sport, dport, dstdport, srcsport, srcdst, dstsport};
 
-struct sig{
-  int bin;
-  string signature;
+struct sig_b{
+  unsigned int src;
+  unsigned short sport;
+  unsigned int dst;
+  unsigned short dport;
+
+  bool operator<(const sig_b& rhs) const
+  {
+    if (src < rhs.src)
+      {
+	return true;
+      }
+    else if (src == rhs.src && sport < rhs.sport)
+      {
+	return true;
+      }
+    else if (src == rhs.src && sport == rhs.sport && dst < rhs.dst)
+      {
+	return true;
+      }
+    else if (src == rhs.src && sport == rhs.sport && dst == rhs.dst && dport < rhs.dport)
+      {
+	return true;
+      }
+    else
+      return false;
+  }
 };
 
 struct indic{
@@ -71,7 +95,7 @@ struct stat_r
 struct sample
 {
   vector<flow_p> flows;
-  string signature;
+  map<sig_b,stat_r> signatures;
 };
   
 int sha_hash(u_int32_t ip);

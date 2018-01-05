@@ -151,6 +151,7 @@ int ii=0;
 map<long,cell> cells;
 map<int,long> lasttime;
 map<long,map<int, sample>> samples;
+map<int,map<sig_b,stat_r>> signatures;
 long smallesttime = 0;
 long firsttime = 0;
 long updatetime = 0;
@@ -400,7 +401,7 @@ void addToSig(string& sig, int type, string key, double vol, double oci)
 }
 
 
-string getSignature(long timestamp, int index)
+long calcSignature(long timestamp, int index)
 {
   int diff = MAX_DIFF;
   long timeinmap = 0;
@@ -416,14 +417,14 @@ string getSignature(long timestamp, int index)
 	    }
 	}
       if (timeinmap == 0)
-	return "";
+	return 0;
       else
 	t = timeinmap;
     }
   if (samples[t][index].flows.size() >= MIN_SAMPLES)
     {
       /* Find a signature if it exists */
-      map <string,stat_r> sigs[8];
+      map <sig_b,stat_r> sigs[8];
       int vol = 0;
       int oci = 0;
       for (vector<flow_p>::iterator fit = samples[t][index].flows.begin(); fit != samples[t][index].flows.end(); fit++)
@@ -433,32 +434,38 @@ string getSignature(long timestamp, int index)
 	      oci += f.oci;
 	      for (int s=src; s<=dstsport; s++)
 		{
-		  string key;
+		  // Default signature matches everything
+		  // zero is a special value, matching everything
+		  sig_b key = {0,0,0,0};
 		  switch(s)
 		    {
 		    case src:
-		      key = to_string(f.flow.src);
+		      key.src = f.flow.src;
 		      break;
 		    case sport:
-		      key = to_string(f.flow.sport);
+		      key.sport = f.flow.sport;
 		      break;
 		    case dst:
-		      key = to_string(f.flow.dst);
+		      key.dst = f.flow.dst;
 		      break;
 		    case dport:
-		      key = to_string(f.flow.dport);
+		      key.dport = f.flow.dport;
 		      break;
 		    case dstdport:
-		      key = to_string(f.flow.dst)+":"+to_string(f.flow.dport);
+		      key.dst = f.flow.dst;
+		      key.dport = f.flow.dport;
 		      break;
 		    case srcsport:
-		      key = to_string(f.flow.src)+":"+to_string(f.flow.sport);
+		      key.src = f.flow.src;
+		      key.sport = f.flow.sport;
 		      break;
 		    case srcdst:
-		      key = to_string(f.flow.src)+":"+to_string(f.flow.dst);
+		      key.src = f.flow.src;
+		      key.dst = f.flow.dst;
 		      break;
 		    case dstsport:
-		      key = to_string(f.flow.dst)+":"+to_string(f.flow.sport);
+		      key.dst = f.flow.dst;
+		      key.sport = f.flow.sport;
 		      break;
 		    default:
 		      break;
@@ -473,22 +480,17 @@ string getSignature(long timestamp, int index)
 	    {
 	      int curvol = 0;
 	      int curoci = 0;
-	      string signature="";
-	      for (map<string,stat_r>::iterator sit=sigs[s].begin(); sit != sigs[s].end(); sit++)
+	      // Find the best signatures
+	      for (map<sig_b,stat_r>::iterator sit=sigs[s].begin(); sit != sigs[s].end(); sit++)
 		{
 		  if (sit->second.vol > vol * FILTER_THRESH)
 		    {
-		      double coci =  oci>0 ? (double)sit->second.oci/oci : 1;
-		      addToSig(signature, s, sit->first, (double)sit->second.vol/vol, coci);
-		      curvol += sit->second.vol;
-		      curoci += sit->second.oci;
+		      samples[t][index].signatures[sit->first] = {sit->second.vol, sit->second.oci};	     
 		    }
 		}
-	      double rv = (double)curvol/vol;
-	      double ro = oci>0 ? (double)curoci/oci : 1;
-	      return signature;
 	    }
     }
+  return t;
 }
 
 
@@ -560,30 +562,41 @@ export_to_db (long timestamp)
     /* Got a message from socket, let's see what it is */
     char message[BRICK_DIMENSION*sizeof(int)];
     int n = recv(sockfd, message, BRICK_DIMENSION*sizeof(int), 0);
+    cout<<" Received message about attack "<<n<<endl;
     indic* attacks_detected = (indic*) message;
-    //struct sig sigs[BRICK_DIMENSION];
     int si = 0;
     int len = 0;
+    char *asigs = (char*) malloc(BIG_MSG);
+    // Format for the signature message is S, followed by bin, followed by signatures, followed by |
+    // bin, signatures, etc. If there is no signature send just bin |
+    asigs[0]='S';
+    int ai=1;
     for (int i=0;i<n/sizeof(indic); i++)
       {
 	cout<<"Attack detected in bin "<<attacks_detected[i].bin
 	    <<" at time "<<attacks_detected[i].timestamp<<endl;
-	string signature = getSignature(attacks_detected[i].timestamp, attacks_detected[i].bin);
-	//sigs[si].bin =  attacks_detected[i].bin;
-	//len += sizeof(int);
-	//sigs[si].signature = signature;
-	//len += signature.size();
+	int bin = attacks_detected[i].bin;
+	memcpy(asigs+ai, (char*) &bin, sizeof(int));
+	ai += sizeof(int);
+	// Find closest timestamp
+	long t = calcSignature(attacks_detected[i].timestamp, attacks_detected[i].bin);
+	for(map<sig_b,stat_r>::iterator sit=samples[t][bin].signatures.begin(); sit != samples[t][bin].signatures.end(); sit++)
+	  {
+	    memcpy(asigs+ai, (char*) &sit->first, sizeof(sig_b));
+	    ai += sizeof(sig_b);
+	    memcpy(asigs+ai, (char*) &sit->second, sizeof(stat_r));
+	    ai += sizeof(stat_r);
+	  }
+	asigs[ai++] = '|';
       }
-    /* Now send signatures to the server for each attack 
-    char* sigmsg = (char*) malloc(len+1);
-    sigmsg[0] = 'S';
-    memcpy(sigmsg+1,(char*) sigs, len);
-    if(send(sockfd, sigmsg, len, 0) < 0)
+    // Don't send the last '|' character
+    ai--;
+    // Now send signatures to the server for each attack 
+    if(send(sockfd, asigs, ai, 0) < 0)
       {
 	perror("Send failed : ");
 	return;
       }
-    */
   }
   else if (FD_ISSET(sockfd, &writeset)) {
     
@@ -593,16 +606,14 @@ export_to_db (long timestamp)
 	{
 	  return;
 	}
-	cout<<it->first<<" bin 191 "<<cells[it->first].databrick_p[191]<<" "<<
-	  cells[it->first].databrick_s[191]<<endl;
-	int expected_size = sizeof(int)+
+	int expected_size = 1+sizeof(int)+
 	  sizeof(long)+BRICK_DIMENSION*(sizeof(unsigned int)+sizeof(int));
 	unsigned char* message = (unsigned char*) malloc(expected_size);
-	//message[0] = 'R';
-	memcpy(message, (unsigned char*)&traceid, sizeof(int));
-	memcpy(message+sizeof(int), (unsigned char*)&it->first, sizeof(long));
-	memcpy(message+sizeof(int)+sizeof(long), (unsigned char*) it->second.databrick_p, BRICK_DIMENSION*sizeof(unsigned int));
-	memcpy(message+sizeof(int)+sizeof(long)+BRICK_DIMENSION*sizeof(unsigned int), (unsigned char*) it->second.databrick_s, BRICK_DIMENSION*sizeof(int));
+	message[0] = 'R';
+	memcpy(message+1, (unsigned char*)&traceid, sizeof(int));
+	memcpy(message+1+sizeof(int), (unsigned char*)&it->first, sizeof(long));
+	memcpy(message+1+sizeof(int)+sizeof(long), (unsigned char*) it->second.databrick_p, BRICK_DIMENSION*sizeof(unsigned int));
+	memcpy(message+1+sizeof(int)+sizeof(long)+BRICK_DIMENSION*sizeof(unsigned int), (unsigned char*) it->second.databrick_s, BRICK_DIMENSION*sizeof(int));
 	if(send(sockfd, message, expected_size, 0) < 0)
 	  {
 	    perror("Send failed : ");
@@ -1139,7 +1150,6 @@ void detect_attack(long timestamp)
 	  is_abnormal[i] ++;
 	  int v=cells[timestamp].databrick_p[i];
 	  int s=cells[timestamp].databrick_s[i];
-	  cout<<timestamp<<"  abnormal for index "<<i<<" is abnormal "<<is_abnormal[i]<<" vol "<<v<<" sym "<<s<<endl;
 	  if (is_abnormal[i] >= int(ATTACK_THRESH/interval)
 	      && is_attack[i] == 0)
 	    {
@@ -1201,7 +1211,6 @@ void detect_attack(long timestamp)
 	      is_abnormal[i] --;
 	      int v=cells[timestamp].databrick_p[i];
 	      int s=cells[timestamp].databrick_s[i];
-	      cout<<timestamp<<" NOT abnormal for index "<<i<<" for volume "<<v<<" for sym "<<s<<" is abnormal "<<is_abnormal[i]<<endl;
 	    }
 	  if (is_attack[i] > 0 && is_abnormal[i] == 0)
 	    {
@@ -1285,7 +1294,7 @@ reset_transmit (void *passed_params)
 	{
 	  int diff = smallesttime - statstime;
 
-	  cout<<"Reset "<<training_done<<" smallesttime "<<smallesttime<<" stats "<<statstime<<" diff "<<diff<<endl;
+	  //cout<<"Reset "<<training_done<<" smallesttime "<<smallesttime<<" stats "<<statstime<<" diff "<<diff<<endl;
 	  if (!training_done)
 	    {
 	      // Find timestamps smaller than the smallest one
@@ -1323,7 +1332,6 @@ reset_transmit (void *passed_params)
 		    }
 		}
 	      int diff = smallesttime - firsttime;
-	      cout<<"Diff "<<diff<<endl;
 	      if(diff > MIN_TRAIN)
 		{
 		  training_done = 1;
@@ -1356,9 +1364,8 @@ reset_transmit (void *passed_params)
 	    }
 	  // Standardize time
 	  long mongoTime = int(dbTime / interval)*interval;
-	  printf("\n Timestamp %ld \n",mongoTime);
       
-	  cout<<"Exporting, map size "<<cells.size()<<" time "<<mongoTime<<endl;
+	  //cout<<"Exporting, map size "<<cells.size()<<" time "<<mongoTime<<endl;
 
 	  // Calculate signatures if any
 	  export_to_db (mongoTime);
@@ -1372,7 +1379,7 @@ reset_transmit (void *passed_params)
 	      exit (-1);
 	    }			/*      Exiting Critical Section     */
 	  
-	  cout<<"Returned from export, map size "<<cells.size()<<" time "<<mongoTime<<endl;
+	  //cout<<"Returned from export, map size "<<cells.size()<<" time "<<mongoTime<<endl;
 	}
     }
   pthread_exit (NULL);
@@ -1493,97 +1500,129 @@ void *connection_handler(void *newsock)
       cout<<"Sock "<<sock<<" sent message to client\n";
     }
   //Receive a message from client
-  while((read_size = recv(sock, message, expected_size, 0)) > 0 )
+  while((read_size = recv(sock, message, BIG_MSG, 0)) > 0 )
     {
-      // Is this a signature message or report?
-      if (0) //message[0] == 'S')
+      //cout<<"Received message size "<<read_size<<" expected "<<expected_size<<endl;
+      char* mptr = message;
+      while(mptr < message+read_size)
 	{
-	  cout<<" Got signature message "<<endl;
-	  struct sig sigs[BRICK_DIMENSION];
-	  memcpy(sigs,message+1, read_size);
-	  int i = 0;
-	  int si = 0;
-	  while (i < read_size)
+	  // Is this a signature message or report?
+	  if (*mptr == 'S')
 	    {
-	      cout << "For bin "<<sigs[si].bin<<" signature "<<sigs[si].signature;
-	      i += (sizeof(int)+sigs[si].signature.size());
-	      si++;
-	    }
-	}
-      else
-	{
-	  int traceid;
-	  long timestamp;
-	  memcpy((unsigned char*) &traceid, message, sizeof(int));
-	  memcpy((unsigned char*) &timestamp, message+sizeof(int), sizeof(long));
-	  cout<<" Got report message, reporter "<<traceid<<" time "<<timestamp<<endl;
-	  cell c;
-	  memcpy(c.databrick_p, message+sizeof(int)+sizeof(long),
-		 BRICK_DIMENSION*sizeof(unsigned int));
-	  memcpy(c.databrick_s, message+sizeof(int)+sizeof(long)
-		 +BRICK_DIMENSION*sizeof(unsigned int),
-		 BRICK_DIMENSION*sizeof(int));
-	  if (lasttime.find(traceid) == lasttime.end())
-	    lasttime[traceid] = 0;
-	  if (timestamp > lasttime[traceid])
-	    {
-	      lasttime[traceid] = timestamp;
-	      if (firsttime == 0)
-		firsttime = timestamp;
-	      smallesttime = timestamp;
-	      for (map<int,long>::iterator lt=lasttime.begin(); lt != lasttime.end(); lt++)
+	      cout<<" Got signature message "<<endl;
+	      mptr++;
+	      // Get signatures out
+	      int bin;
+	      memcpy(&bin, mptr, sizeof(int));
+	      cout<<" For bin "<<bin<<endl;
+	      mptr += sizeof(int);
+	      while (*mptr != '|' && *mptr != 'R' && mptr < message+read_size)
 		{
-		  if (lt->second < smallesttime)
-		    smallesttime = lt->second;
+		  map<sig_b, stat_r> m;
+		  sig_b s={0,0,0,0};
+		  stat_r r={0,0};
+		  if (signatures.find(bin) == signatures.end())
+		    signatures.insert(pair<int, map<sig_b,stat_r>>(bin,m));
+		  memcpy(&s, mptr, sizeof(sig_b));
+		  mptr += sizeof(sig_b);
+		  memcpy(&r, mptr, sizeof(stat_r));
+		  mptr += sizeof(stat_r);
+		  if (signatures[bin].find(s) == signatures[bin].end())
+		    signatures[bin].insert(pair<sig_b,stat_r>(s,r));
+		  else
+		    {
+		      signatures[bin][s].vol += r.vol;
+		      signatures[bin][s].oci += r.oci;
+		    }
+		  cout<<"From "<<s.src<<":"<<s.sport<<" "<<s.dst<<":"<<s.dport<<" v="<<
+		    signatures[bin][s].vol<<" o="<<signatures[bin][s].oci<<endl; 		    
 		}
-	      int diff = smallesttime - firsttime;
-	      cout<<"Smallest time "<<smallesttime<<" first time "<<firsttime<<" diff "<<diff<<endl;
-	    }
-	  if (cells.find(timestamp) == cells.end())
-	    {
-	      //cout<<"Inserted cell for "<<timestamp<<endl;
-	      cells.insert(pair<long,cell>(timestamp,c));
 	    }
 	  else
-	    for(int i=0; i<BRICK_DIMENSION;i++)
-	      {
-		cells[timestamp].databrick_p[i] += c.databrick_p[i];
-		cells[timestamp].databrick_s[i] += c.databrick_s[i];
-		if (i == 191)
-		  cout<<timestamp<<" for 191 "<<cells[timestamp].databrick_p[i]<<" "<<cells[timestamp].databrick_s[i]<<endl;
-	      }
-	  /* See if there is an attack, we should ask the client for signature */
-	  if (ii > 0)
 	    {
-	      int error;
-	      if ((error = pthread_mutex_lock (&indicator_lock)))
+	      mptr++;
+	      int traceid;
+	      long timestamp;
+	      memcpy((unsigned char*) &traceid, mptr, sizeof(int));
+	      memcpy((unsigned char*) &timestamp, mptr+sizeof(int), sizeof(long));
+	      //cout<<" Got report message, reporter "<<traceid<<" time "<<timestamp<<endl;
+	      cell c;
+	      memcpy(c.databrick_p, mptr+sizeof(int)+sizeof(long),
+		 BRICK_DIMENSION*sizeof(unsigned int));
+	      memcpy(c.databrick_s, mptr+sizeof(int)+sizeof(long)
+		     +BRICK_DIMENSION*sizeof(unsigned int),
+		     BRICK_DIMENSION*sizeof(int));
+	      if (lasttime.find(traceid) == lasttime.end())
+		lasttime[traceid] = 0;
+	      if (timestamp > lasttime[traceid])
 		{
-		  fprintf (stderr,
-			   "Error Number %d For Acquiring Lock. FATAL ERROR. \n",
-			   error);
-		  exit (-1);
+		  lasttime[traceid] = timestamp;
+		  if (firsttime == 0)
+		    firsttime = timestamp;
+		  smallesttime = timestamp;
+		  for (map<int,long>::iterator lt=lasttime.begin(); lt != lasttime.end(); lt++)
+		    {
+		      if (lt->second < smallesttime)
+			smallesttime = lt->second;
+		    }
+		  int diff = smallesttime - firsttime;
+		  //cout<<"Smallest time "<<smallesttime<<" first time "<<firsttime<<" diff "<<diff<<endl;
 		}
-	      
-	      // get indicators in message and send out
-	      char* im = (char*) indicators;
-	      if(send(sock, im, ii*sizeof(indic), 0) < 0)
+	      if (cells.find(timestamp) == cells.end())
 		{
-		  perror("Send failed : ");
-		  return 0;
+		  //cout<<"Inserted cell for "<<timestamp<<endl;
+		  cells.insert(pair<long,cell>(timestamp,c));
 		}
-	      ii = 0;
-	      
-	      if ((error = pthread_mutex_unlock (&indicator_lock)))
-		{
-		  fprintf (stderr,
-			   "Error Number %d For Releasing Lock. FATAL ERROR. \n",
-			   error);
-		  exit (-1);
-		}
+	      else
+		for(int i=0; i<BRICK_DIMENSION;i++)
+		  {
+		    cells[timestamp].databrick_p[i] += c.databrick_p[i];
+		    cells[timestamp].databrick_s[i] += c.databrick_s[i];
+		  }
+	      mptr += expected_size;
 	    }
 	}
+      /* See if there is an attack, we should ask the client for signature */
+      if (ii > 0)
+	{
+	  int error;
+	  if ((error = pthread_mutex_lock (&indicator_lock)))
+	    {
+	      fprintf (stderr,
+		       "Error Number %d For Acquiring Lock. FATAL ERROR. \n",
+		       error);
+	      exit (-1);
+	    }
+	  
+	  // get indicators in message and send out
+	  char* im = (char*) indicators;
+	  if(send(sock, im, ii*sizeof(indic), 0) < 0)
+	    {
+	      perror("Send failed : ");
+	      return 0;
+	    }
+	  cout<<"Sent attack report"<<endl;
+	  ii = 0;
+	  
+	  if ((error = pthread_mutex_unlock (&indicator_lock)))
+	    {
+	      fprintf (stderr,
+		       "Error Number %d For Releasing Lock. FATAL ERROR. \n",
+		       error);
+	      exit (-1);
+	    }
+	  /*
+	  for(map<int,map<sig_b,stat_r>>::iterator mit=signatures.begin(); mit != signatures.end(); mit++)
+	    for(map<sig_b,stat_r>::iterator sit=signatures[mit->first].begin(); sit != signatures[mit->first].end(); sit++)
+	      {
+		cout<<"Sig bin "<<mit->first<<" from "<<sit->first.src<<":"<<sit->first.sport<<
+		  sit->first.dst<<":"<<sit->first.dport<<" vol "<<sit->second.vol<<" oci "<<sit->second.oci<<endl;
+	      }
+	  */ 
+	}
+	 
       usleep(1);
-    }
+	}
   reported--;
   cout<<"Closing socket "<<sock<<" reporters now "<<reported<<endl;
   close(sock);

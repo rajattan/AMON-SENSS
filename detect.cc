@@ -450,7 +450,7 @@ printHelp (void)
 int main (int argc, char *argv[])
 {
   char c;
-  int bin = sha_hash(1452865536);
+  int bin = sha_hash(2379511808);
   cout << "Bin src is "<<bin<<endl;
   bin = sha_hash(1250050048);
   cout << "Bin dst is "<<bin<<endl;
