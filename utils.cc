@@ -4,6 +4,31 @@
 #include <arpa/inet.h>
 #include <string.h>
 
+int sgn(double x)
+{
+  if (x<0)
+    return -1;
+  else if (x>0)
+    return 1;
+  else
+    return 0;
+}
+
+int zeros(sig_b a)
+{
+  return (a.src == 0) + (a.sport == 0) + (a.dst == 0) + (a.dport == 0);
+}
+
+/* A signature is better if it has more items defined or if it has ports and srcip */
+int bettersig(sig_b a, sig_b b)
+{
+  if (zeros(a) < zeros(b) ||
+      zeros(a) == zeros(b) && a.src > b.src &&
+      (a.sport > b.sport || a.dport > b.dport))
+    return 1;
+  else
+    return 0;
+}
 
 int sha_hash(u_int32_t ip)
 {

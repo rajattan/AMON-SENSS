@@ -322,7 +322,7 @@ void detect_attack(unsigned int timestamp)
 	{
 	  if (!is_attack[i])
 	    is_abnormal[i] ++;
-	  if (is_abnormal[i] > ATTACK_THRESH && is_attack[i] == 0)
+	  if (is_abnormal[i] > ATTACK_LOW && is_attack[i] == 0)
 	    {
 	      /* Signal attack detection */
 	      //is_attack = 1;

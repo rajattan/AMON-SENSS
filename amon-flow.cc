@@ -1,8 +1,8 @@
- //================================================================================//
+//================================================================================//
 //================================================================================//
 /*
  *
- * (C) 2015 - Michalis Kallitsis <mgkallit@merit.edu>
+ * (C) 2015 - Michalis Kasllitsis <mgkallit@merit.edu>
  *            Stilian Stoev <sstoev@umich.edu>
  *            George Michailidis <gmichail@ufl.edu>
  *            Modified by Jelena Mirkovic <sunshine@isi.edu>
@@ -79,6 +79,7 @@ sql::ResultSet *res;
 int interval=3;
 int reporters=0;
 int reported=0;
+map<int, int> adms;
 fd_set readset, writeset;
 
 int isready;
@@ -157,9 +158,12 @@ long firsttime = 0;
 long updatetime = 0;
 long statstime = 0;
 int traceid = 0;
-
+char im[BIG_MSG];
+int imlen = 0;
+int admsg = 0;
 
 pthread_mutex_t critical_section_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t admsg_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t indicator_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* Make sure we don't fire if data is not ready */
@@ -401,7 +405,7 @@ void addToSig(string& sig, int type, string key, double vol, double oci)
 }
 
 
-long calcSignature(long timestamp, int index)
+long calcSignature(long timestamp, int index, int aoci)
 {
   int diff = MAX_DIFF;
   long timeinmap = 0;
@@ -427,68 +431,75 @@ long calcSignature(long timestamp, int index)
       map <sig_b,stat_r> sigs[8];
       int vol = 0;
       int oci = 0;
+      int i = 0;
       for (vector<flow_p>::iterator fit = samples[t][index].flows.begin(); fit != samples[t][index].flows.end(); fit++)
 	{
-	      flow_p f = *fit;
-	      vol += f.len;
-	      oci += f.oci;
-	      for (int s=src; s<=dstsport; s++)
-		{
-		  // Default signature matches everything
-		  // zero is a special value, matching everything
-		  sig_b key = {0,0,0,0};
-		  switch(s)
-		    {
-		    case src:
-		      key.src = f.flow.src;
-		      break;
-		    case sport:
-		      key.sport = f.flow.sport;
-		      break;
-		    case dst:
-		      key.dst = f.flow.dst;
-		      break;
-		    case dport:
-		      key.dport = f.flow.dport;
-		      break;
-		    case dstdport:
-		      key.dst = f.flow.dst;
-		      key.dport = f.flow.dport;
-		      break;
-		    case srcsport:
-		      key.src = f.flow.src;
-		      key.sport = f.flow.sport;
-		      break;
-		    case srcdst:
-		      key.src = f.flow.src;
-		      key.dst = f.flow.dst;
-		      break;
-		    case dstsport:
-		      key.dst = f.flow.dst;
-		      key.sport = f.flow.sport;
-		      break;
-		    default:
-		      break;
-		    }
-		  if (sigs[s].find(key) == sigs[s].end())
-		    sigs[s][key] = {0,0};
-		  sigs[s][key].vol += f.len;
-		  sigs[s][key].oci += f.oci;
-		}
+	  flow_p f = *fit;
+	  i++;
+	  // If different sign drop this flow sample
+	  if (sgn(f.oci) != sgn(aoci))
+	    {
+	      //cout<<"Flow for line "<<samples[t][index].raw[i-1]<<" oci "<<f.oci<<" sign diff than "<<sgn(aoci)<<endl;
+	      continue;
 	    }
+	  //cout<<"Keeping flow for line "<<samples[t][index].raw[i-1]<<" oci "<<f.oci<<" sign same as "<<sgn(aoci)<<endl;
+	  vol += f.len;
+	  oci += f.oci;
 	  for (int s=src; s<=dstsport; s++)
 	    {
-	      int curvol = 0;
-	      int curoci = 0;
-	      // Find the best signatures
-	      for (map<sig_b,stat_r>::iterator sit=sigs[s].begin(); sit != sigs[s].end(); sit++)
+	      // Default signature matches everything
+	      // zero is a special value, matching everything
+	      sig_b key = {0,0,0,0};
+	      switch(s)
 		{
-		  if (sit->second.vol > vol * FILTER_THRESH)
-		    {
-		      samples[t][index].signatures[sit->first] = {sit->second.vol, sit->second.oci};	     
-		    }
+		case src:
+		  key.src = f.flow.src;
+		  break;
+		case sport:
+		  key.sport = f.flow.sport;
+		  break;
+		case dst:
+		  key.dst = f.flow.dst;
+		  break;
+		case dport:
+		  key.dport = f.flow.dport;
+		  break;
+		case dstdport:
+		  key.dst = f.flow.dst;
+		  key.dport = f.flow.dport;
+		  break;
+		case srcsport:
+		  key.src = f.flow.src;
+		  key.sport = f.flow.sport;
+		  break;
+		case srcdst:
+		  key.src = f.flow.src;
+		  key.dst = f.flow.dst;
+		  break;
+		case dstsport:
+		  key.dst = f.flow.dst;
+		  key.sport = f.flow.sport;
+		  break;
+		default:
+		  break;
+		}
+	      if (sigs[s].find(key) == sigs[s].end())
+		sigs[s][key] = {0,0};
+	      sigs[s][key].vol += f.len;
+	      sigs[s][key].oci += f.oci;
+	    }
+	}
+      for (int s=src; s<=dstsport; s++)
+	{
+	  // Find the best signatures
+	  for (map<sig_b,stat_r>::iterator sit=sigs[s].begin(); sit != sigs[s].end(); sit++)
+	    {
+	      if (abs(sit->second.oci) > abs(oci) * FILTER_THRESH)
+		{
+		  samples[t][index].signatures[sit->first] = {sit->second.vol, sit->second.oci, (double)sit->second.vol/vol, (double)sit->second.oci/oci};	     
 		}
 	    }
+	}
     }
   return t;
 }
@@ -574,18 +585,22 @@ export_to_db (long timestamp)
     for (int i=0;i<n/sizeof(indic); i++)
       {
 	cout<<"Attack detected in bin "<<attacks_detected[i].bin
-	    <<" at time "<<attacks_detected[i].timestamp<<endl;
+	    <<" at time "<<attacks_detected[i].timestamp<<" oci "<<attacks_detected[i].oci<<endl;
 	int bin = attacks_detected[i].bin;
 	memcpy(asigs+ai, (char*) &bin, sizeof(int));
 	ai += sizeof(int);
 	// Find closest timestamp
-	long t = calcSignature(attacks_detected[i].timestamp, attacks_detected[i].bin);
+	long t = calcSignature(attacks_detected[i].timestamp, attacks_detected[i].bin, attacks_detected[i].oci);
+	cout<<"Closest timestamp "<<t<<endl;
 	for(map<sig_b,stat_r>::iterator sit=samples[t][bin].signatures.begin(); sit != samples[t][bin].signatures.end(); sit++)
 	  {
 	    memcpy(asigs+ai, (char*) &sit->first, sizeof(sig_b));
 	    ai += sizeof(sig_b);
 	    memcpy(asigs+ai, (char*) &sit->second, sizeof(stat_r));
 	    ai += sizeof(stat_r);
+	    cout<<"From "<<sit->first.src<<":"<<sit->first.sport<<" "<<
+	      sit->first.dst<<":"<<sit->first.dport<<" v="<<sit->second.vol<<"("<<sit->second.volp<<") o="
+		<<sit->second.oci<<"("<<sit->second.ocip<<")"<<endl;
 	  }
 	asigs[ai++] = '|';
       }
@@ -597,6 +612,8 @@ export_to_db (long timestamp)
 	perror("Send failed : ");
 	return;
       }
+    else
+      cout<<"Sent "<<ai<<" characters to server\n";
   }
   else if (FD_ISSET(sockfd, &writeset)) {
     
@@ -838,38 +855,42 @@ intoa (unsigned int addr)
 
 /*****************************************************************/
 
-void addSample(int index, flow_p f)
+void addSample(int index, flow_p f, char* line, long i)
 {
   /* Decide based on flow size and asymmetry if to add it or not */
   int toadd = rand() % MAX_FLOW_SIZE;
-    /* Add asymmetric flows, and add longer flows before shorter ones */
-  if (toadd > f.len || f.oci == 0)
+  /* Add asymmetric flows, and add longer flows before shorter ones */
+  if (f.oci == 0)
     return;
 
-  for (int i = f.start; i <= f.end; i++)
+  if (samples.find(i) == samples.end())
     {
-      if (samples.find(i) == samples.end())
+      map<int,sample> m;
+      samples.insert(pair<long,map<int,sample>>(i,m));
+    }
+  if (samples[i].find(index) == samples[i].end())
+    {
+      sample s;
+      samples[i].insert(pair<int,sample>(index,s));
+    }
+  int s = samples[i][index].flows.size();
+  if (samples[i][index].flows.size() < MAX_SAMPLES)
+    {
+      samples[i][index].flows.push_back(f);
+      //memcpy(samples[i][index].raw[s],line,strlen(line));
+    }
+  else
+    {
+      if (toadd > f.len)
+	return;
+      /* Replace the flow you have already if this one is 
+	 bigger or more asymmetric */
+      int j = rand() % MAX_SAMPLES;
+      if ((abs(samples[i][index].flows[j].oci) < abs(f.oci)) ||
+	  (samples[i][index].flows[j].len < f.len))
 	{
-	  map<int,sample> m;
-	  samples.insert(pair<long,map<int,sample>>(i,m));
-	}
-      if (samples[i].find(index) == samples[i].end())
-	{
-	  sample s;
-	  samples[i].insert(pair<int,sample>(index,s));
-	}
-      if (samples[i][index].flows.size() < MAX_SAMPLES)
-	{
-	  samples[i][index].flows.push_back(f);
-	}
-      else
-	{
-	  /* Replace the flow you have already if this one is 
-	     bigger or more asymmetric */
-	  int j = rand() % MAX_SAMPLES;
-	  if ((abs(samples[i][index].flows[j].oci) < abs(f.oci)) ||
-	      (samples[i][index].flows[j].len < f.len))
-	    samples[i][index].flows[j] = f;
+	  samples[i][index].flows[j] = f;
+	  //memcpy(samples[i][index].raw[j],line,strlen(line));
 	}
     }
 }
@@ -878,7 +899,7 @@ void addSample(int index, flow_p f)
 /*****************************************************************/
 
 void
-amonProcessing(flow_t flow, int len, long start, long end, int oci)
+amonProcessing(flow_t flow, int len, long start, long end, int oci, char* line)
 {
   int d_bucket = 0, s_bucket = 0;	    /* indices for the databrick */
   int error;
@@ -928,22 +949,21 @@ amonProcessing(flow_t flow, int len, long start, long end, int oci)
 	  //cout<<"Inserted cell for "<<i<<endl;
 	  cells.insert(pair<long,cell>(i,c));
 	}
-      flow_p f={start, end, len, oci, flow};
-	
-      addSample(d_bucket, f);
       //cout<<i<<"prev src bucket "<<s_bucket<<" oci "<<cells[i].databrick_s[s_bucket]<<" dst bucket "<<d_bucket<<" len "<<cells[i].databrick_p[d_bucket]<<" oci "<<cells[i].databrick_s[d_bucket] <<endl;
       cells[i].databrick_p[d_bucket] += len;	// add bytes to payload databrick for dst
       cells[i].databrick_s[d_bucket] += oci;	// add oci to symmetry databrick for dst
       cells[i].databrick_s[s_bucket] -= oci;	// subtract oci from symmetry databrick for src
       //cout<<i<<" src bucket "<<s_bucket<<" oci "<<cells[i].databrick_s[s_bucket]<<" dst bucket "<<d_bucket<<" len "<<cells[i].databrick_p[d_bucket]<<" oci "<<cells[i].databrick_s[d_bucket] <<endl;
+      flow_p f={start, end, len, oci, flow};
+      addSample(d_bucket, f, line, i);
+
       if ((error = pthread_mutex_unlock (&critical_section_lock)))
 	{
 	  fprintf (stderr,
 		   "Error Number %d For Releasing Lock. FATAL ERROR. \n",
 		   error);
 	  exit (-1);
-	}
-      
+	} 
     }
 }
 
@@ -954,6 +974,8 @@ amonProcessingNfdump (char* line, long time)
   /* 2|1453485557|768|1453485557|768|6|0|0|0|2379511808|44694|0|0|0|2792759296|995|0|0|0|0|2|0|1|40 */
   // Get start and end time of a flow
   char* tokene;
+  char saveline[MAX_LINE];
+  memcpy(saveline, line, strlen(line));
   parse(line,'|', &delimiters);
   long start = strtol(line+delimiters[0], &tokene, 10);
   long end = strtol(line+delimiters[2], &tokene, 10);
@@ -990,7 +1012,7 @@ amonProcessingNfdump (char* line, long time)
   if (proto == TCP)
     {
       // There is a PUSH flag
-      if (flags & 16 > 0)
+      if ((flags & 8) > 0)
 	oci = 0;
       else
 	oci = 1;
@@ -1013,7 +1035,7 @@ amonProcessingNfdump (char* line, long time)
   else
     // unknown, do nothing
     oci=0;
-  amonProcessing(flow, bytes, start, end, oci);
+  amonProcessing(flow, bytes, start, end, oci, saveline);
 }
 
 void
@@ -1057,9 +1079,8 @@ amonProcessingPcap (struct pfring_pkthdr *h, const u_char * p, long time)
       flow.sport = h->extended_hdr.parsed_pkt.l4_src_port;
       flow.dport = h->extended_hdr.parsed_pkt.l4_dst_port;
       len = h->len;
-      /* TODO handle OCI here */
-      
-      amonProcessing(flow, len, time, time, 0);
+      /* TODO handle OCI here */     
+      amonProcessing(flow, len, time, time, 0, 0);
     }
 }
 
@@ -1108,7 +1129,7 @@ int abnormal(int type, int index, unsigned int timestamp)
 
   if (type == vol && data > mean + NUMSTD*std)
     return 1;
-  else if (type == sym && (data > mean + NUMSTD*std || data < mean - NUMSTD*std))
+  else if (type == sym && abs(data) > abs(mean) + NUMSTD*abs(std))
     return 1;
   else
     return 0;
@@ -1147,10 +1168,14 @@ void detect_attack(long timestamp)
 	}
       if (training_done && abnormal(vol, i, timestamp) && abnormal(sym, i, timestamp))
 	{
-	  is_abnormal[i] ++;
+	  if (is_abnormal[i] < int(ATTACK_HIGH/interval))
+	    {
+	      is_abnormal[i]++;
+	      cout<<timestamp<<" abnormal for "<<i<<" points "<<is_abnormal[i]<<endl;
+	    }
 	  int v=cells[timestamp].databrick_p[i];
 	  int s=cells[timestamp].databrick_s[i];
-	  if (is_abnormal[i] >= int(ATTACK_THRESH/interval)
+	  if (is_abnormal[i] >= int(ATTACK_LOW/interval)
 	      && is_attack[i] == 0)
 	    {
 	      /* Signal attack detection */
@@ -1166,6 +1191,7 @@ void detect_attack(long timestamp)
 		}
 	      indicators[ii].bin=i;
 	      indicators[ii].timestamp=timestamp;
+	      indicators[ii].oci=cells[timestamp].databrick_s[i];
 	      ii++;
 	      if ((error = pthread_mutex_unlock (&indicator_lock)))
 		{
@@ -1209,8 +1235,7 @@ void detect_attack(long timestamp)
 	  if (is_abnormal[i] > 0)
 	    {
 	      is_abnormal[i] --;
-	      int v=cells[timestamp].databrick_p[i];
-	      int s=cells[timestamp].databrick_s[i];
+	       cout<<timestamp<<" NOT abnormal for "<<i<<" points "<<is_abnormal[i]<<endl;
 	    }
 	  if (is_attack[i] > 0 && is_abnormal[i] == 0)
 	    {
@@ -1294,7 +1319,7 @@ reset_transmit (void *passed_params)
 	{
 	  int diff = smallesttime - statstime;
 
-	  //cout<<"Reset "<<training_done<<" smallesttime "<<smallesttime<<" stats "<<statstime<<" diff "<<diff<<endl;
+	  cout<<"Reset "<<training_done<<" smallesttime "<<smallesttime<<" stats "<<statstime<<" diff "<<diff<<endl;
 	  if (!training_done)
 	    {
 	      // Find timestamps smaller than the smallest one
@@ -1340,6 +1365,7 @@ reset_transmit (void *passed_params)
 	    }
 	  else
 	    {
+	      cout<<"Detecting attacks"<<endl;
 	      // Find timestamps smaller than the smallest one
 	      for (map<long,cell>::iterator it=cells.begin(); it != cells.end(); it++)
 		{
@@ -1502,7 +1528,7 @@ void *connection_handler(void *newsock)
   //Receive a message from client
   while((read_size = recv(sock, message, BIG_MSG, 0)) > 0 )
     {
-      //cout<<"Received message size "<<read_size<<" expected "<<expected_size<<endl;
+      cout<<"Received message size "<<read_size<<" expected "<<expected_size<<endl;
       char* mptr = message;
       while(mptr < message+read_size)
 	{
@@ -1516,11 +1542,16 @@ void *connection_handler(void *newsock)
 	      memcpy(&bin, mptr, sizeof(int));
 	      cout<<" For bin "<<bin<<endl;
 	      mptr += sizeof(int);
+	      ofstream osig;
+	      char filename[MAXLEN];
+	      sprintf(filename,"sig.%d", bin);
+	      osig.open(filename, std::ios_base::app);
+	      
 	      while (*mptr != '|' && *mptr != 'R' && mptr < message+read_size)
 		{
 		  map<sig_b, stat_r> m;
 		  sig_b s={0,0,0,0};
-		  stat_r r={0,0};
+		  stat_r r={0,0,0,0};
 		  if (signatures.find(bin) == signatures.end())
 		    signatures.insert(pair<int, map<sig_b,stat_r>>(bin,m));
 		  memcpy(&s, mptr, sizeof(sig_b));
@@ -1533,10 +1564,29 @@ void *connection_handler(void *newsock)
 		    {
 		      signatures[bin][s].vol += r.vol;
 		      signatures[bin][s].oci += r.oci;
+		      signatures[bin][s].volp += r.volp;
+		      signatures[bin][s].ocip += r.ocip;
 		    }
-		  cout<<"From "<<s.src<<":"<<s.sport<<" "<<s.dst<<":"<<s.dport<<" v="<<
-		    signatures[bin][s].vol<<" o="<<signatures[bin][s].oci<<endl; 		    
+		  cout<<bin<<" from "<<s.src<<":"<<s.sport<<" "<<s.dst<<":"<<s.dport<<" v="<<
+		    signatures[bin][s].vol<<" o="<<signatures[bin][s].oci<<endl;
+		  osig<<bin<<" from "<<s.src<<":"<<s.sport<<" "<<s.dst<<":"<<s.dport<<" v="<<
+		    signatures[bin][s].vol<<"("<<signatures[bin][s].volp<<") o="
+		      <<signatures[bin][s].oci<<"("<<signatures[bin][s].ocip<<")"<<endl;
 		}
+	      /* Find the best signature */
+	      sig_b bestsig = {0,0,0,0};
+	      int vol = 0;
+	      int oci = 0;
+	      for (map<sig_b,stat_r>::iterator sit = signatures[bin].begin(); sit != signatures[bin].end(); sit++)
+		if (abs(signatures[bin][sit->first].oci) > abs(oci) ||
+		    (signatures[bin][sit->first].oci == oci && bettersig(sit->first, bestsig)))
+		  {
+		    bestsig = sit->first;
+		    vol = sit->second.vol;
+		    oci = sit->second.oci;
+		  }
+	      cout<<"Best "<<bin<<" from "<<bestsig.src<<":"<<bestsig.sport<<" "<<bestsig.dst<<":"<<bestsig.dport<<" v="<<vol<<" o="<<oci<<endl;
+	      osig.close();
 	    }
 	  else
 	    {
@@ -1545,7 +1595,7 @@ void *connection_handler(void *newsock)
 	      long timestamp;
 	      memcpy((unsigned char*) &traceid, mptr, sizeof(int));
 	      memcpy((unsigned char*) &timestamp, mptr+sizeof(int), sizeof(long));
-	      //cout<<" Got report message, reporter "<<traceid<<" time "<<timestamp<<endl;
+	      cout<<" Got report message, reporter "<<traceid<<" time "<<timestamp<<" training done? "<<training_done<<endl;
 	      cell c;
 	      memcpy(c.databrick_p, mptr+sizeof(int)+sizeof(long),
 		 BRICK_DIMENSION*sizeof(unsigned int));
@@ -1582,48 +1632,65 @@ void *connection_handler(void *newsock)
 	      mptr += expected_size;
 	    }
 	}
-      /* See if there is an attack, we should ask the client for signature */
-      if (ii > 0)
+      int error;
+      if ((error = pthread_mutex_lock (&admsg_lock)))
 	{
-	  int error;
-	  if ((error = pthread_mutex_lock (&indicator_lock)))
-	    {
-	      fprintf (stderr,
-		       "Error Number %d For Acquiring Lock. FATAL ERROR. \n",
-		       error);
-	      exit (-1);
-	    }
-	  
-	  // get indicators in message and send out
-	  char* im = (char*) indicators;
-	  if(send(sock, im, ii*sizeof(indic), 0) < 0)
+	  fprintf (stderr,
+		   "Error Number %d For Acquiring Lock. FATAL ERROR. \n",
+		   error);
+	  exit (-1);
+	}
+      /* Is there attack detection message ready to send? */
+      if (admsg > 0 && adms[sock] == 0)
+	{
+	  if(send(sock, im, imlen, 0) < 0)
 	    {
 	      perror("Send failed : ");
 	      return 0;
 	    }
-	  cout<<"Sent attack report"<<endl;
+	  else
+	    cout<<"Sent attack detected message to "<<sock<<endl;
+	  adms[sock] = 1;
+	  admsg--;
+	  /* Reset all socks */
+	  if (admsg == 0)
+	    for (map<int,int>::iterator ait=adms.begin(); ait != adms.end(); ait++)
+	      adms[ait->first] = 0;
+	}
+      if ((error = pthread_mutex_unlock (&admsg_lock)))
+	{
+	  fprintf (stderr,
+		   "Error Number %d For Releasing Lock. FATAL ERROR. \n",
+		   error);
+	  exit (-1);
+	}
+      /* See if there is an attack and we have finished sending notification about prior attacks */
+      if ((error = pthread_mutex_lock (&indicator_lock)))
+	{
+	  fprintf (stderr,
+		   "Error Number %d For Acquiring Lock. FATAL ERROR. \n",
+		   error);
+	  exit (-1);
+	}
+      if (ii > 0 && admsg == 0)
+	{
+	  // get indicators in message and send out
+	  memcpy(im, (char*) indicators, ii*sizeof(struct indic));
+	  imlen = ii*sizeof(struct indic);
 	  ii = 0;
-	  
-	  if ((error = pthread_mutex_unlock (&indicator_lock)))
-	    {
-	      fprintf (stderr,
-		       "Error Number %d For Releasing Lock. FATAL ERROR. \n",
-		       error);
-	      exit (-1);
-	    }
-	  /*
-	  for(map<int,map<sig_b,stat_r>>::iterator mit=signatures.begin(); mit != signatures.end(); mit++)
-	    for(map<sig_b,stat_r>::iterator sit=signatures[mit->first].begin(); sit != signatures[mit->first].end(); sit++)
-	      {
-		cout<<"Sig bin "<<mit->first<<" from "<<sit->first.src<<":"<<sit->first.sport<<
-		  sit->first.dst<<":"<<sit->first.dport<<" vol "<<sit->second.vol<<" oci "<<sit->second.oci<<endl;
-	      }
-	  */ 
+	  admsg = reporters;	  
 	}
-	 
+      if ((error = pthread_mutex_unlock (&indicator_lock)))
+	{
+	  fprintf (stderr,
+		   "Error Number %d For Releasing Lock. FATAL ERROR. \n",
+		   error);
+	  exit (-1);
+	}	 
       usleep(1);
-	}
+    }
   reported--;
+  adms.erase(sock);
   cout<<"Closing socket "<<sock<<" reporters now "<<reported<<endl;
   close(sock);
   return 0;
@@ -1787,6 +1854,7 @@ main (int argc, char *argv[])
 	    }
 	  smallesttime = 0;
 	  reported++;
+	  adms.insert(pair<int, int>(newsock,0));
 	  cout<<"Accepted at address "<<address.sin_addr.s_addr<<" reporters "<<reporters<<" reported "<<reported<<endl;
 	  if (reported == reporters)
 	    isready = 1;
