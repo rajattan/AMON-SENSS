@@ -5,6 +5,7 @@
 #include <netinet/in.h>
 #include <stdint.h>
 #include <vector>
+#include <string>
 #include <map>
 
 
@@ -24,8 +25,8 @@ using namespace std;
 #define AR_LEN 30
 #define AMON_PORT 10000
 #define BACKLOG 30
-#define ATTACK_LOW 20    /* Make this a configurable param */
-#define ATTACK_HIGH 120  /* Make this a configurable param */
+#define ATTACK_LOW 10    /* Make this a configurable param */
+#define ATTACK_HIGH 20  /* Make this a configurable param */
 #define HIST_LEN 3600    /* How long we remember history */
 #define MIN_TRAIN 3600
 #define NUMSTD 5
@@ -36,13 +37,13 @@ using namespace std;
 #define MAX_DIFF 10
 #define BIG_MSG MAX_SAMPLES*MAX_LINE
 
-enum stype{src, dst, sport, dport, dstdport, srcsport, srcdst, dstsport};
 
 struct sig_b{
   unsigned int src;
   unsigned short sport;
   unsigned int dst;
   unsigned short dport;
+  unsigned char proto;
 
   bool operator<(const sig_b& rhs) const
   {
@@ -62,6 +63,10 @@ struct sig_b{
       {
 	return true;
       }
+    else if (src == rhs.src && sport == rhs.sport && dst == rhs.dst && dport == rhs.dport && proto < rhs.proto)
+      {
+	return true;
+      }
     else
       return false;
   }
@@ -74,10 +79,11 @@ struct indic{
 };
 
 struct flow_t{ 
- u_int32_t src;
- u_int32_t dst;
- u_int16_t sport;
- u_int16_t dport;
+  u_int32_t src;
+  u_int32_t dst;
+  u_int16_t sport;
+  u_int16_t dport;
+  unsigned char proto;
  };
 
 struct flow_p
@@ -109,4 +115,6 @@ int sha_hash(u_int32_t ip);
 int sgn(double x);
 
 int bettersig(sig_b a, sig_b b);
+
+string printsignature(sig_b s);
 #endif

@@ -2,7 +2,7 @@
 //================================================================================//
 /*
  *
- * (C) 2015 - Michalis Kasllitsis <mgkallit@merit.edu>
+ * (C) 2015 - Michalis Kallitsis <mgkallit@merit.edu>
  *            Stilian Stoev <sstoev@umich.edu>
  *            George Michailidis <gmichail@ufl.edu>
  *            Modified by Jelena Mirkovic <sunshine@isi.edu>
@@ -24,7 +24,6 @@
  */
 //================================================================================//
 //================================================================================//
-
 
 #include <signal.h>
 #include <iostream>
@@ -161,6 +160,7 @@ int traceid = 0;
 char im[BIG_MSG];
 int imlen = 0;
 int admsg = 0;
+int seqnum = 0;
 
 pthread_mutex_t critical_section_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t admsg_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -350,61 +350,6 @@ long *string_to_long_array(char *input, long *level)
     return array;
 }
 
-void addToSig(string& sig, int type, string key, double vol, double oci)
-{
-  string filter = "";
-  switch(type)
-    {
-    case src:
-      filter = "src";
-      break;
-    case dst:
-      filter = "dst";
-      break;
-    case sport:
-      filter = "sport";
-      break;
-    case dport:
-      filter = "dport";
-      break;
-    default:
-      break;
-    }
-  if (filter != "")
-    sig += (filter + "=" + key);
-  else
-    {
-      string filter1, filter2;
-      switch(type)
-	{
-	case srcsport:
-	  filter1 = "src";
-	  filter2 = "sport";
-	  break;
-	case dstdport:
-	  filter1 = "dst";
-	  filter2 = "dport";
-	  break;
-	case srcdst:
-	  filter1 = "src";
-	  filter2 = "dst";
-	  break;
-	case dstsport:
-	  filter1 = "dst";
-	  filter2 = "sport";
-	  break;
-	default:
-	  break;
-	}
-      int colon = key.find(":");
-      string key1 = key.substr(0,colon);
-      string key2 = key.substr(colon+1);
-      sig += (filter1 + "=" + key1 + " and " + filter2 + "=" + key2);
-    }
-  sig += (" vol " + to_string(vol) + " oci " + to_string(oci));
-}
-
-
 long calcSignature(long timestamp, int index, int aoci)
 {
   int diff = MAX_DIFF;
@@ -428,7 +373,7 @@ long calcSignature(long timestamp, int index, int aoci)
   if (samples[t][index].flows.size() >= MIN_SAMPLES)
     {
       /* Find a signature if it exists */
-      map <sig_b,stat_r> sigs[8];
+      map <sig_b,stat_r> sigs[16];
       int vol = 0;
       int oci = 0;
       int i = 0;
@@ -445,57 +390,39 @@ long calcSignature(long timestamp, int index, int aoci)
 	  //cout<<"Keeping flow for line "<<samples[t][index].raw[i-1]<<" oci "<<f.oci<<" sign same as "<<sgn(aoci)<<endl;
 	  vol += f.len;
 	  oci += f.oci;
-	  for (int s=src; s<=dstsport; s++)
+	  for (int s=0; s<16; s++)
 	    {
 	      // Default signature matches everything
-	      // zero is a special value, matching everything
-	      sig_b key = {0,0,0,0};
-	      switch(s)
-		{
-		case src:
-		  key.src = f.flow.src;
-		  break;
-		case sport:
-		  key.sport = f.flow.sport;
-		  break;
-		case dst:
-		  key.dst = f.flow.dst;
-		  break;
-		case dport:
-		  key.dport = f.flow.dport;
-		  break;
-		case dstdport:
-		  key.dst = f.flow.dst;
-		  key.dport = f.flow.dport;
-		  break;
-		case srcsport:
-		  key.src = f.flow.src;
-		  key.sport = f.flow.sport;
-		  break;
-		case srcdst:
-		  key.src = f.flow.src;
-		  key.dst = f.flow.dst;
-		  break;
-		case dstsport:
-		  key.dst = f.flow.dst;
-		  key.sport = f.flow.sport;
-		  break;
-		default:
-		  break;
-		}
+	      // zero is a special value, matching everything.
+	      // Only allow signatures where destination is known.
+	      sig_b key = {0,0,0,0,0};
+	      key.dst = f.flow.dst;
+	      // src, sport, dport, proto
+	      if ((s & 8) > 0)
+		key.src = f.flow.src;
+	      if ((s & 4) > 0)
+		key.sport = f.flow.sport;
+	      if ((s & 2) > 0)
+		key.dport = f.flow.dport;
+	      if ((s & 1) > 0)
+		key.proto = f.flow.proto;
 	      if (sigs[s].find(key) == sigs[s].end())
 		sigs[s][key] = {0,0};
 	      sigs[s][key].vol += f.len;
 	      sigs[s][key].oci += f.oci;
+	      cout<<"s = "<<s<<" key=from "<<key.src<<":"<<key.sport<<" "<<key.dst<<":"<<key.dport<<" "<<(int)key.proto<<" v="<<sigs[s][key].vol<<" oci="<<sigs[s][key].oci<<endl;
 	    }
 	}
-      for (int s=src; s<=dstsport; s++)
+      for (int s=0; s<16; s++)
 	{
 	  // Find the best signatures
 	  for (map<sig_b,stat_r>::iterator sit=sigs[s].begin(); sit != sigs[s].end(); sit++)
 	    {
+	      sig_b k = sit->first;
 	      if (abs(sit->second.oci) > abs(oci) * FILTER_THRESH)
 		{
+		  cout<<"Passed filter "<<index<<" from "<<k.src<<":"<<k.sport<<" "<<k.dst<<":"<<k.dport<<" "<<(int)k.proto<<" v="<<sit->second.vol<<" oci="<<sit->second.oci<<endl;
+
 		  samples[t][index].signatures[sit->first] = {sit->second.vol, sit->second.oci, (double)sit->second.vol/vol, (double)sit->second.oci/oci};	     
 		}
 	    }
@@ -573,47 +500,52 @@ export_to_db (long timestamp)
     /* Got a message from socket, let's see what it is */
     char message[BRICK_DIMENSION*sizeof(int)];
     int n = recv(sockfd, message, BRICK_DIMENSION*sizeof(int), 0);
-    cout<<" Received message about attack "<<n<<endl;
-    indic* attacks_detected = (indic*) message;
-    int si = 0;
-    int len = 0;
-    char *asigs = (char*) malloc(BIG_MSG);
-    // Format for the signature message is S, followed by bin, followed by signatures, followed by |
+    if (n > 0)
+      {
+	cout<<" Received message about attack "<<n<<endl;
+	indic* attacks_detected = (indic*) message;
+	int si = 0;
+	int len = 0;
+	char *asigs = (char*) malloc(BIG_MSG);
+	// Format for the signature message is S, followed by bin, followed by signatures, followed by |
     // bin, signatures, etc. If there is no signature send just bin |
-    asigs[0]='S';
-    int ai=1;
-    for (int i=0;i<n/sizeof(indic); i++)
-      {
-	cout<<"Attack detected in bin "<<attacks_detected[i].bin
-	    <<" at time "<<attacks_detected[i].timestamp<<" oci "<<attacks_detected[i].oci<<endl;
-	int bin = attacks_detected[i].bin;
-	memcpy(asigs+ai, (char*) &bin, sizeof(int));
-	ai += sizeof(int);
-	// Find closest timestamp
-	long t = calcSignature(attacks_detected[i].timestamp, attacks_detected[i].bin, attacks_detected[i].oci);
-	cout<<"Closest timestamp "<<t<<endl;
-	for(map<sig_b,stat_r>::iterator sit=samples[t][bin].signatures.begin(); sit != samples[t][bin].signatures.end(); sit++)
+	asigs[0]='S';
+	int ai=1;
+	for (int i=0;i<n/sizeof(indic); i++)
 	  {
-	    memcpy(asigs+ai, (char*) &sit->first, sizeof(sig_b));
-	    ai += sizeof(sig_b);
-	    memcpy(asigs+ai, (char*) &sit->second, sizeof(stat_r));
-	    ai += sizeof(stat_r);
-	    cout<<"From "<<sit->first.src<<":"<<sit->first.sport<<" "<<
-	      sit->first.dst<<":"<<sit->first.dport<<" v="<<sit->second.vol<<"("<<sit->second.volp<<") o="
-		<<sit->second.oci<<"("<<sit->second.ocip<<")"<<endl;
+	    cout<<"Attack detected in bin "<<attacks_detected[i].bin
+		<<" at time "<<attacks_detected[i].timestamp<<" oci "<<attacks_detected[i].oci<<endl;
+	    int bin = attacks_detected[i].bin;
+	    memcpy(asigs+ai, (char*) &bin, sizeof(int));
+	    ai += sizeof(int);
+	    // Find closest timestamp and calculate signatures
+	    long t = calcSignature(attacks_detected[i].timestamp, attacks_detected[i].bin, attacks_detected[i].oci);
+	    cout<<"Closest timestamp "<<t<<endl;
+	    // How many signatures?
+	    int hm=samples[t][bin].signatures.size();
+	    memcpy(asigs+ai, (char*) &hm, sizeof(int));
+	    ai += sizeof(int);
+	    for(map<sig_b,stat_r>::iterator sit=samples[t][bin].signatures.begin(); sit != samples[t][bin].signatures.end(); sit++)
+	      {
+		memcpy(asigs+ai, (char*) &sit->first, sizeof(sig_b));
+		ai += sizeof(sig_b);
+		memcpy(asigs+ai, (char*) &sit->second, sizeof(stat_r));
+		ai += sizeof(stat_r);
+		cout<<"From "<<sit->first.src<<":"<<sit->first.sport<<" "<<
+		  sit->first.dst<<":"<<sit->first.dport<<" v="<<sit->second.vol<<"("<<sit->second.volp<<") o="
+		    <<sit->second.oci<<"("<<sit->second.ocip<<")"<<endl;
+	      }
 	  }
-	asigs[ai++] = '|';
+	// Now send signatures to the server for each attack 
+	if(send(sockfd, asigs, ai, 0) < 0)
+	  {
+	    perror("Send failed : ");
+	    return;
+	  }
+	else
+	  cout<<"Sent "<<ai<<" characters to server\n";
+	// Now or later delete signatures and samples for some timestamps
       }
-    // Don't send the last '|' character
-    ai--;
-    // Now send signatures to the server for each attack 
-    if(send(sockfd, asigs, ai, 0) < 0)
-      {
-	perror("Send failed : ");
-	return;
-      }
-    else
-      cout<<"Sent "<<ai<<" characters to server\n";
   }
   else if (FD_ISSET(sockfd, &writeset)) {
     
@@ -623,19 +555,30 @@ export_to_db (long timestamp)
 	{
 	  return;
 	}
-	int expected_size = 1+sizeof(int)+
+	int expected_size = 1+2*sizeof(int)+
 	  sizeof(long)+BRICK_DIMENSION*(sizeof(unsigned int)+sizeof(int));
 	unsigned char* message = (unsigned char*) malloc(expected_size);
-	message[0] = 'R';
-	memcpy(message+1, (unsigned char*)&traceid, sizeof(int));
-	memcpy(message+1+sizeof(int), (unsigned char*)&it->first, sizeof(long));
-	memcpy(message+1+sizeof(int)+sizeof(long), (unsigned char*) it->second.databrick_p, BRICK_DIMENSION*sizeof(unsigned int));
-	memcpy(message+1+sizeof(int)+sizeof(long)+BRICK_DIMENSION*sizeof(unsigned int), (unsigned char*) it->second.databrick_s, BRICK_DIMENSION*sizeof(int));
-	if(send(sockfd, message, expected_size, 0) < 0)
+	int mi=0;
+	message[mi] = 'R';
+	mi++;
+	memcpy(message+mi, (unsigned char*)&traceid, sizeof(int));
+	mi += sizeof(int);
+	memcpy(message+mi, (unsigned char*)&seqnum, sizeof(seqnum));
+	mi += sizeof(int);
+	memcpy(message+mi, (unsigned char*)&it->first, sizeof(long));
+	mi += sizeof(long);
+	memcpy(message+mi, (unsigned char*) it->second.databrick_p, BRICK_DIMENSION*sizeof(unsigned int));
+	mi += BRICK_DIMENSION*sizeof(unsigned int);
+	memcpy(message+mi, (unsigned char*) it->second.databrick_s, BRICK_DIMENSION*sizeof(int));
+	mi += BRICK_DIMENSION*sizeof(int);
+	if(send(sockfd, message, mi, 0) < 0)
 	  {
 	    perror("Send failed : ");
 	    return;
 	  }
+	else
+	  cout<<"Sent "<<mi<<" to server for timestamp "<<it->first<<" seqnum "<<seqnum<<"\n";
+	seqnum++;
 	cells.erase(it++);
       }
   }
@@ -995,6 +938,7 @@ amonProcessingNfdump (char* line, long time)
   flow.sport = atoi(line+delimiters[9]); // sport
   flow.dst = strtol(line+delimiters[13], &tokene, 10);
   flow.dport = atoi(line+delimiters[14]); // dport
+  flow.proto = proto;
   int flags = atoi(line+delimiters[19]);
   pkts = atoi(line+delimiters[21]);
   pkts = (int)(pkts/(dur+1))+1;
@@ -1506,17 +1450,19 @@ void *connection_handler(void *newsock)
   //Get the socket descriptor
   int sock = *(int*)newsock;
   int read_size;
-  int expected_size = sizeof(int)+sizeof(long)+
+  int expected_size = 2*sizeof(int)+sizeof(long)+
     BRICK_DIMENSION*(sizeof(unsigned int)+sizeof(int));
-  char message[BIG_MSG];
+  unsigned char* message = (unsigned char*)malloc(BIG_MSG);
+  int message_start = 0;
 
   while(!isready)
     {
       sleep(1);
     }
   //Send a GO message to client
-  sprintf(message,"%s","GO");
-  if(send(sock, message, strlen(message), 0) < 0)
+  message[0] = 'G';
+  message[1] = 'O';
+  if(send(sock, message, 2, 0) < 0)
     {
       perror("Send failed : ");
       return 0;
@@ -1526,12 +1472,15 @@ void *connection_handler(void *newsock)
       cout<<"Sock "<<sock<<" sent message to client\n";
     }
   //Receive a message from client
-  while((read_size = recv(sock, message, BIG_MSG, 0)) > 0 )
+  while (1)
+    {
+  while((read_size = recv(sock, message+message_start, BIG_MSG-message_start, 0)) > 0 )
     {
       cout<<"Received message size "<<read_size<<" expected "<<expected_size<<endl;
-      char* mptr = message;
-      while(mptr < message+read_size)
+      unsigned char* mptr = message;
+      while(mptr < message+read_size+message_start)
 	{
+	  cout << "Left to read "<<(message+message_start+read_size-mptr)<<" first is "<<*mptr<<endl;
 	  // Is this a signature message or report?
 	  if (*mptr == 'S')
 	    {
@@ -1542,12 +1491,32 @@ void *connection_handler(void *newsock)
 	      memcpy(&bin, mptr, sizeof(int));
 	      cout<<" For bin "<<bin<<endl;
 	      mptr += sizeof(int);
+	      // How many signatures are there?
+	      int hm;
+	      memcpy(&hm, mptr, sizeof(int));
+	      mptr += sizeof(int);
+	      cout << "Signatures "<<hm<<endl;
+	      // Check if we have a complete message or not
+	      int left = message+read_size+message_start-mptr;
+	      if (hm*(sizeof(sig_b)+sizeof(stat_r)) > left && left > 0);
+		{
+		  // Prepare to receive more data to patch the segment
+		  unsigned char* tmp = (unsigned char*) malloc(BIG_MSG);
+		  tmp[0] = 'S';
+		  memcpy(tmp+1, &hm, sizeof(int));
+		  memcpy(tmp+sizeof(int)+1, mptr, message+read_size+message_start-mptr);
+		  delete(message);
+		  message = tmp;
+		  message_start = left + 1 + sizeof(int);
+		  cout<<"Message too short, start "<<message_start<<endl;
+		  break;
+		}
 	      ofstream osig;
 	      char filename[MAXLEN];
 	      sprintf(filename,"sig.%d", bin);
 	      osig.open(filename, std::ios_base::app);
 	      
-	      while (*mptr != '|' && *mptr != 'R' && mptr < message+read_size)
+	      for (int j=0; j<hm;j++)
 		{
 		  map<sig_b, stat_r> m;
 		  sig_b s={0,0,0,0};
@@ -1567,9 +1536,7 @@ void *connection_handler(void *newsock)
 		      signatures[bin][s].volp += r.volp;
 		      signatures[bin][s].ocip += r.ocip;
 		    }
-		  cout<<bin<<" from "<<s.src<<":"<<s.sport<<" "<<s.dst<<":"<<s.dport<<" v="<<
-		    signatures[bin][s].vol<<" o="<<signatures[bin][s].oci<<endl;
-		  osig<<bin<<" from "<<s.src<<":"<<s.sport<<" "<<s.dst<<":"<<s.dport<<" v="<<
+		  cout<<bin<<" "<<s.src<<":"<<s.sport<<" "<<s.dst<<":"<<s.dport<<(int)s.proto<<" v="<<
 		    signatures[bin][s].vol<<"("<<signatures[bin][s].volp<<") o="
 		      <<signatures[bin][s].oci<<"("<<signatures[bin][s].ocip<<")"<<endl;
 		}
@@ -1585,25 +1552,47 @@ void *connection_handler(void *newsock)
 		    vol = sit->second.vol;
 		    oci = sit->second.oci;
 		  }
-	      cout<<"Best "<<bin<<" from "<<bestsig.src<<":"<<bestsig.sport<<" "<<bestsig.dst<<":"<<bestsig.dport<<" v="<<vol<<" o="<<oci<<endl;
+	      cout<<"Best "<<bin<<" "<<printsignature(bestsig)<<" v="<<vol<<" o="<<oci<<endl;
+	      osig<<printsignature(bestsig)<<endl;
 	      osig.close();
 	    }
-	  else
+	  else if (*mptr == 'R')
 	    {
 	      mptr++;
+	      // Check if we have a complete message or not
+	      int left = message+read_size+message_start-mptr;
+	      cout <<"Left "<<left<<" expected "<<expected_size<<endl;
+	      if (expected_size > left && left > 0)
+		{
+		  // Prepare to receive more data to patch the segment
+		  unsigned char* tmp = (unsigned char*) malloc(BIG_MSG);
+		  tmp[0] = 'R';
+		  memcpy(tmp+1, mptr, message+read_size+message_start-mptr);
+		  delete(message);
+		  message = tmp;
+		  message_start = left+1;
+		  cout<<"Message too short, start "<<message_start<<endl;
+		  break;
+		}
 	      int traceid;
+	      int tseq;
 	      long timestamp;
 	      memcpy((unsigned char*) &traceid, mptr, sizeof(int));
-	      memcpy((unsigned char*) &timestamp, mptr+sizeof(int), sizeof(long));
-	      cout<<" Got report message, reporter "<<traceid<<" time "<<timestamp<<" training done? "<<training_done<<endl;
+	      mptr += sizeof(int);
+	      memcpy((unsigned char*) &tseq, mptr, sizeof(int));
+	      mptr += sizeof(int);
+	      memcpy((unsigned char*) &timestamp, mptr, sizeof(long));
+	      mptr += sizeof(long);
+	      cout<<" Got report message, reporter "<<traceid<<" seqnum "<<tseq <<" time "<<timestamp<<" training done? "<<training_done<<endl;
 	      cell c;
-	      memcpy(c.databrick_p, mptr+sizeof(int)+sizeof(long),
+	      memcpy(c.databrick_p, mptr,
 		 BRICK_DIMENSION*sizeof(unsigned int));
-	      memcpy(c.databrick_s, mptr+sizeof(int)+sizeof(long)
-		     +BRICK_DIMENSION*sizeof(unsigned int),
+	      mptr += BRICK_DIMENSION*sizeof(unsigned int);
+	      memcpy(c.databrick_s, mptr,
 		     BRICK_DIMENSION*sizeof(int));
+	      mptr += BRICK_DIMENSION*sizeof(int);
 	      if (lasttime.find(traceid) == lasttime.end())
-		lasttime[traceid] = 0;
+		lasttime[traceid] = timestamp;
 	      if (timestamp > lasttime[traceid])
 		{
 		  lasttime[traceid] = timestamp;
@@ -1613,10 +1602,13 @@ void *connection_handler(void *newsock)
 		  for (map<int,long>::iterator lt=lasttime.begin(); lt != lasttime.end(); lt++)
 		    {
 		      if (lt->second < smallesttime)
-			smallesttime = lt->second;
+			{
+			  cout<<"Smallest time for "<<traceid<<" is "<<lt->second<<endl;
+			  smallesttime = lt->second;
+			}		      
 		    }
 		  int diff = smallesttime - firsttime;
-		  //cout<<"Smallest time "<<smallesttime<<" first time "<<firsttime<<" diff "<<diff<<endl;
+		  cout<<"Smallest time "<<smallesttime<<" first time "<<firsttime<<" diff "<<diff<<endl;
 		}
 	      if (cells.find(timestamp) == cells.end())
 		{
@@ -1629,7 +1621,11 @@ void *connection_handler(void *newsock)
 		    cells[timestamp].databrick_p[i] += c.databrick_p[i];
 		    cells[timestamp].databrick_s[i] += c.databrick_s[i];
 		  }
-	      mptr += expected_size;
+	    }
+	  else
+	    {
+	      cout <<"First letter of message is "<<*mptr<<endl;
+	      mptr++;
 	    }
 	}
       int error;
@@ -1688,6 +1684,8 @@ void *connection_handler(void *newsock)
 	  exit (-1);
 	}	 
       usleep(1);
+    }
+  cout<<"Read size "<<read_size<<endl;
     }
   reported--;
   adms.erase(sock);
