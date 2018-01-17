@@ -1,5 +1,5 @@
 #
-# This Makefile assumes that PF_RING is installed as a binary package: see http://packages.ntop.org 
+# This Makefile assumes that PF_RING is installed as a binary package: see http://packages.ntop.org
 #
 #
 # DNA Support
@@ -18,7 +18,7 @@ O_FLAG     = -O2 -DHAVE_PF_RING
 #MONGOLIBDIR = /usr/local/lib
 # Search directories
 #
-#INCLUDE    =  -I${MONGODIR} -I${BSONDIR} 
+#INCLUDE    =  -I${MONGODIR} -I${BSONDIR}
 
 #
 # C compiler and flags
@@ -26,17 +26,17 @@ O_FLAG     = -O2 -DHAVE_PF_RING
 #
 # CROSS_COMPILE=arm-mv5sft-linux-gnueabi-
 #-std=gnu9
-CC         = ${CROSS_COMPILE}g++ 
+CC         = ${CROSS_COMPILE}g++
 CFLAGS     =  ${O_FLAG} -Wall -std=gnu99 ${DNA_DEFINE} -D HAVE_ZERO -D ENABLE_BPF -D HAVE_LIBNUMA -D HAVE_PTHREAD_SETAFFINITY_NP -O2  -g -pg -std=c++0x
 # LDFLAGS  =
 
 #
 # User and System libraries
 #
-LIBS       = -lpcap -lpthread -lpfring  -lrt   -lnuma -lrt -lmongoc-1.0 -lbson-1.0 -lcrypto -lssl -lmysqlcppconn
+LIBS       = -lpcap -lpthread -lpfring  -lrt   -lnuma -lrt -lmongoc-1.0 -lbson-1.0 -lcrypto -lssl 
 
 # How to make an object file
-%.o: %.cc 
+%.o: %.cc
 	@echo "=*= making object $@ =*="
 	${CC} ${CFLAGS} -c $< -o $@
 
@@ -45,7 +45,7 @@ LIBS       = -lpcap -lpthread -lpfring  -lrt   -lnuma -lrt -lmongoc-1.0 -lbson-1
 #
 PFPROGS   = amon-flow
 
-TARGETS   = ${PFPROGS} 
+TARGETS   = ${PFPROGS}
 
 all: ${TARGETS}
 
@@ -58,7 +58,7 @@ detect: detect.o utils.o
 profile: profile.o utils.o
 	${CC} ${CFLAGS} profile.o utils.o ${LIBS} -o $@
 
-amon:  amon.o 
+amon:  amon.o
 	${CC} ${CFLAGS} amon.o  ${LIBS} -o $@
 
 amon-red:  amon-red.o utils.o

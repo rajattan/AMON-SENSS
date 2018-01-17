@@ -23,7 +23,6 @@ using namespace std;
 #define UDP 17
 #define BUF_SIZE 1000
 #define AR_LEN 30
-#define AMON_PORT 10000
 #define BACKLOG 30
 #define ATTACK_LOW 10    /* Make this a configurable param */
 #define ATTACK_HIGH 20  /* Make this a configurable param */
@@ -101,6 +100,13 @@ struct stat_r
   int oci;
   double volp;
   double ocip;
+};
+
+struct stat_f
+{
+  sig_b sig;
+  int goodflows;
+  int badflows;
 };
 
 struct sample
