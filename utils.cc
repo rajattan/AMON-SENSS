@@ -4,6 +4,7 @@
 #include <arpa/inet.h>
 #include <string.h>
 #include <sstream>
+#include <iostream>
 
 namespace patch
 {
@@ -31,7 +32,7 @@ string toip(unsigned int addr)
   return out;
 }
 
-string printsignature(sig_b s)
+string printsignature(flow_t s)
 {
   string out;
   if (s.src != 0)
@@ -73,13 +74,13 @@ int sgn(double x)
     return 0;
 }
 
-int zeros(sig_b a)
+int zeros(flow_t a)
 {
   return (a.src == 0) + (a.sport == 0) + (a.dst == 0) + (a.dport == 0) + (a.proto == 0);
 }
 
 /* A signature is better if it has more items defined or if it has ports and srcip */
-int bettersig(sig_b a, sig_b b)
+int bettersig(flow_t a, flow_t b)
 {
   if (zeros(a) < zeros(b) ||
       ((zeros(a) == zeros(b)) && (a.src > b.src) &&
@@ -89,6 +90,18 @@ int bettersig(sig_b a, sig_b b)
     return 0;
 }
 
+int sha_hash(u_int32_t ip)
+{
+  /* Take the last two bytes and mod BRICK_DIMENSION */
+  int a = (int)((int) (ip & 0x00ffffff) / 256 / 256);
+  int b = (int)((int) (ip & 0x0000ffff) / 256);
+  //int a = (int)((int)(ip & 0x0000ffff) / 256);
+  //int b = (int)(ip & 0x000000ff);
+  int o = (a+b) % BRICK_DIMENSION;
+  return o;  
+}
+  
+/*
 int sha_hash(u_int32_t ip)
 {
   struct in_addr in;
@@ -102,7 +115,7 @@ int sha_hash(u_int32_t ip)
   SHA256_Update(&sha256, address, strlen(address));
   SHA256_Final(output, &sha256);
 
-  /* Take the last few bytes and mod BRICK_DIMENSION */
+  /* Take the last few bytes and mod BRICK_DIMENSION 
   int rvalue = 0;
   for (int i=SHA256_DIGEST_LENGTH-4; i<SHA256_DIGEST_LENGTH; i++)
     rvalue = rvalue*256+(int)output[i];
@@ -110,3 +123,4 @@ int sha_hash(u_int32_t ip)
   return (unsigned int)rvalue % BRICK_DIMENSION;
 
 }
+*/

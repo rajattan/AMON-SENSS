@@ -11,6 +11,7 @@
 
 using namespace std;
 
+#define HMB 1.1
 #define FILE_INTERVAL 3600 
 #define TIMEZONE_ADJUST 5*3600
 #define BRICK_DIMENSION 256
@@ -24,27 +25,29 @@ using namespace std;
 #define BUF_SIZE 1000
 #define AR_LEN 30
 #define BACKLOG 30
-#define ATTACK_LOW 10    /* Make this a configurable param */
-#define ATTACK_HIGH 20  /* Make this a configurable param */
+#define ATTACK_LOW 30    /* Make this a configurable param */
+#define ATTACK_HIGH 60  /* Make this a configurable param */
 #define HIST_LEN 3600    /* How long we remember history */
 #define MIN_TRAIN 3600
 #define NUMSTD 5
 #define MAX_SAMPLES 100
 #define MIN_SAMPLES 2
 #define MAX_FLOW_SIZE 10000;
-#define FILTER_THRESH 0.3
+#define FILTER_THRESH 0.0
+#define SIG_FLOWS 100
+#define SPEC_THRESH 0.05
 #define MAX_DIFF 10
 #define BIG_MSG MAX_SAMPLES*MAX_LINE
 
 
-struct sig_b{
+struct flow_t{
   unsigned int src;
   unsigned short sport;
   unsigned int dst;
   unsigned short dport;
   unsigned char proto;
 
-  bool operator<(const sig_b& rhs) const
+  bool operator<(const flow_t& rhs) const
   {
     if (src < rhs.src)
       {
@@ -77,14 +80,6 @@ struct indic{
   long timestamp;
 };
 
-struct flow_t{ 
-  u_int32_t src;
-  u_int32_t dst;
-  u_int16_t sport;
-  u_int16_t dport;
-  unsigned char proto;
- };
-
 struct flow_p
 {
   long start;
@@ -102,25 +97,35 @@ struct stat_r
   double ocip;
 };
 
+
+
 struct stat_f
 {
-  sig_b sig;
-  int goodflows;
-  int badflows;
+  long timestamp;
+  int vol;
+  int oci;
+  flow_t sig;
+  map <flow_t,int> matchedflows;
+  map <flow_t,int> reverseflows;
+};
+
+struct sample_p
+{
+  vector<flow_p> flows;
+  map<flow_t,stat_r> signatures;
 };
 
 struct sample
 {
-  vector<flow_p> flows;
-  map<sig_b,stat_r> signatures;
-  char raw[MAX_SAMPLES][MAX_LINE];
+  sample_p bins[BRICK_DIMENSION];
 };
+
   
 int sha_hash(u_int32_t ip);
 
 int sgn(double x);
 
-int bettersig(sig_b a, sig_b b);
+int bettersig(flow_t a, flow_t b);
 
-string printsignature(sig_b s);
+string printsignature(flow_t s);
 #endif

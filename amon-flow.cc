@@ -30,7 +30,6 @@
 #include <algorithm>
 #include <fstream>
 #include <sched.h>
-//#include <stdlib.h>
 #include <sys/types.h>
 #include <sys/select.h>
 #include <sys/stat.h>
@@ -69,10 +68,6 @@
 
 int* delimiters;
 int interval=3;
-int reporters=0;
-int reported=0;
-map<int, int> adms;
-fd_set readset, writeset;
 
 int isready;
 long dbTime = 0;
@@ -130,30 +125,29 @@ struct cell
 {
   unsigned int databrick_p[BRICK_DIMENSION];	 /* databrick payload */
   int databrick_s[BRICK_DIMENSION];	         /* databrick symmetry */
-  //unsigned int wfilter_p[BRICK_DIMENSION];	 /* payload w filter */
-  //int wfilter_s[BRICK_DIMENSION];	         /* symmetry w filter */
+  unsigned int wfilter_p[BRICK_DIMENSION];	 /* payload w filter */
+  int wfilter_s[BRICK_DIMENSION];	         /* symmetry w filter */
   int fresh;
 };
 
 
 ofstream debug[BRICK_DIMENSION];
 int is_attack[BRICK_DIMENSION];
+int reported[BRICK_DIMENSION];
 int is_abnormal[BRICK_DIMENSION]; 
 ofstream outfiles[BRICK_DIMENSION];
 
 
-char filename[MAXLEN];
 map<long,cell> cells;
-map<long,map<int, sample>> samples;
+map<long,sample> samples;
 map<int,stat_f> signatures;
 long firsttime = 0;    /* Beginning of trace */
+long firsttimeinfile = 0; /* First time in the current file */
 long updatetime = 0;   /* Time of last update */
 long statstime = 0;    /* Time when we move the stats to history */
 int traceid = 0;
-char im[BIG_MSG];
-int imlen = 0;
-int admsg = 0;
-int seqnum = 0;
+char filename[MAXLEN];
+int print = 0;
 
 pthread_mutex_t cells_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t samples_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -327,7 +321,8 @@ long calcSignature(long timestamp, int index, int aoci)
   long t = timestamp;
   if (samples.find(timestamp) == samples.end())
     {
-      for (map<long,map<int,sample>>::iterator it = samples.begin(); it != samples.end(); it++)
+      // Find the closest timestamp
+      for (map<long,sample>::iterator it = samples.begin(); it != samples.end(); it++)
 	{
 	  if (abs(it->first - timestamp) < diff)
 	    {
@@ -340,14 +335,14 @@ long calcSignature(long timestamp, int index, int aoci)
       else
 	t = timeinmap;
     }
-  if (samples[t][index].flows.size() >= MIN_SAMPLES)
+  if (samples[t].bins[index].flows.size() >= MIN_SAMPLES)
     {
       /* Find a signature if it exists */
-      map <sig_b,stat_r> sigs[16];
+      map <flow_t,stat_r> sigs[16];
       int vol = 0;
       int oci = 0;
       int i = 0;
-      for (vector<flow_p>::iterator fit = samples[t][index].flows.begin(); fit != samples[t][index].flows.end(); fit++)
+      for (vector<flow_p>::iterator fit = samples[t].bins[index].flows.begin(); fit != samples[t].bins[index].flows.end(); fit++)
 	{
 	  flow_p f = *fit;
 	  i++;
@@ -362,7 +357,7 @@ long calcSignature(long timestamp, int index, int aoci)
 	      // Default signature matches everything
 	      // zero is a special value, matching everything.
 	      // Only allow signatures where destination is known.
-	      sig_b key = {0,0,0,0,0};
+	      flow_t key = {0,0,0,0,0};
 	      key.dst = f.flow.dst;
 	      // src, sport, dport, proto
 	      if ((s & 8) > 0)
@@ -382,12 +377,12 @@ long calcSignature(long timestamp, int index, int aoci)
       for (int s=0; s<16; s++)
 	{
 	  // Find the best signatures
-	  for (map<sig_b,stat_r>::iterator sit=sigs[s].begin(); sit != sigs[s].end(); sit++)
+	  for (map<flow_t,stat_r>::iterator sit=sigs[s].begin(); sit != sigs[s].end(); sit++)
 	    {
-	      sig_b k = sit->first;
+	      flow_t k = sit->first;
 	      if (abs(sit->second.oci) > abs(oci) * FILTER_THRESH)
 		{
-		  samples[t][index].signatures[sit->first] = {sit->second.vol, sit->second.oci, (double)sit->second.vol/vol, (double)sit->second.oci/oci};	     
+		  samples[t].bins[index].signatures[sit->first] = {sit->second.vol, sit->second.oci, (double)sit->second.vol/vol, (double)sit->second.oci/oci};	     
 		}
 	    }
 	}
@@ -409,39 +404,44 @@ void addSample(int index, flow_p f, long i)
 
   if (samples.find(i) == samples.end())
     {
-      map<int,sample> m;
-      samples.insert(pair<long,map<int,sample>>(i,m));
+      sample m;
+      samples.insert(pair<long,sample>(i,m));
     }
-  if (samples[i].find(index) == samples[i].end())
+
+  int s = samples[i].bins[index].flows.size();
+  if (samples[i].bins[index].flows.size() < MAX_SAMPLES)
     {
-      sample s;
-      samples[i].insert(pair<int,sample>(index,s));
-    }
-  int s = samples[i][index].flows.size();
-  if (samples[i][index].flows.size() < MAX_SAMPLES)
-    {
-      samples[i][index].flows.push_back(f);
+      samples[i].bins[index].flows.push_back(f);
       //memcpy(samples[i][index].raw[s],line,strlen(line));
     }
   else
     {
-      if (toadd > f.len)
-	return;
+      //if (toadd > f.len)
+      //return;
       
       /* Replace the flow you have already if this one is 
-	 bigger or more asymmetric */
+	 bigger or more asymmetric or more recent */
       int j = rand() % MAX_SAMPLES;
-      if ((abs(samples[i][index].flows[j].oci) < abs(f.oci)) ||
-	  (samples[i][index].flows[j].len < f.len))
+      if (abs(samples[i].bins[index].flows[j].oci) <= abs(f.oci))// ||
+	//(samples[i].bins[index].flows[j].len < f.len))
 	{
-	  samples[i][index].flows[j] = f;
+	  samples[i].bins[index].flows[j] = f;
 	}
     }
 }
 
-int match(flow_t flow, sig_b sig)
+int empty(flow_t sig)
+{
+  return ((sig.src == 0) && (sig.sport == 0) &&
+	  (sig.dst == 0) && (sig.dport == 0) &&
+	  (sig.proto == 0));
+}
+	    
+int match(flow_t flow, flow_t sig)
 {
   if (flow.proto != sig.proto && sig.proto != 0)
+    return 0;
+  if (empty(sig))
     return 0;
   if ((flow.src == sig.src || sig.src == 0) &&
       (flow.sport == sig.sport || sig.sport == 0) &&
@@ -452,6 +452,12 @@ int match(flow_t flow, sig_b sig)
     return 0;
 }
 
+int malformed(long timestamp)
+{
+  if (timestamp < firsttimeinfile || timestamp > firsttimeinfile + FILE_INTERVAL)
+    return 1;
+  return 0;
+}
 /*****************************************************************/
 
 void
@@ -461,36 +467,22 @@ amonProcessing(flow_t flow, int len, long start, long end, int oci, char* line)
   int error;
   unsigned int payload;
 
-  if (buf_time == 0)
-    {
-      buf_time = end;
-      buf_cnt = 1;
-    }
-  else if (buf_time != end)
-    {
-      buf_cnt--;
-      if (buf_cnt == 0)
-	{
-	  buf_time = end;
-	  buf_cnt = 1;
-	}
-    }
-  else
-    buf_cnt++;
-
-  dbTime = buf_time;
+  // Detect if the flow is malformed and reject it
+  if (malformed(start) || malformed(end))
+    return;
   
   s_bucket = sha_hash(flow.src); /* Jelena: should add  & mask */
   d_bucket = sha_hash(flow.dst); /* Jelena: should add  & mask */
-  
+
   cell c;
   memset(c.databrick_p, 0, BRICK_DIMENSION*sizeof(unsigned int));
   memset(c.databrick_s, 0, BRICK_DIMENSION*sizeof(int));
-  //memset(c.wfilter_p, 0, BRICK_DIMENSION*sizeof(unsigned int));
-  //memset(c.wfilter_s, 0, BRICK_DIMENSION*sizeof(int));
+  memset(c.wfilter_p, 0, BRICK_DIMENSION*sizeof(unsigned int));
+  memset(c.wfilter_s, 0, BRICK_DIMENSION*sizeof(int));
   // Standardize time
   start = int(start / interval)*interval;
   end = int(end / interval)*interval;
+
   for (long i = start; i <= end; i+= interval)
     {
         int error;
@@ -502,31 +494,102 @@ amonProcessing(flow_t flow, int len, long start, long end, int oci, char* line)
 	    exit (-1);
 	  }
 
-      if (cells.find(i) == cells.end())
+	map<long,cell>::iterator it = cells.find(i);
+	if (it == cells.end())
+	  {
+	    cells.insert(pair<long,cell>(i,c));
+	    it = cells.find(i);
+	  }
+      it->second.databrick_p[d_bucket] += len;	// add bytes to payload databrick for dst
+      it->second.databrick_s[d_bucket] += oci;	// add oci to symmetry databrick for dst
+      it->second.databrick_s[s_bucket] -= oci;	// subtract oci from symmetry databrick for src
+      it->second.wfilter_p[d_bucket] += len;	// add bytes to payload databrick for dst
+      it->second.wfilter_s[d_bucket] += oci;	// add oci to symmetry databrick for dst
+      it->second.wfilter_s[s_bucket] -= oci;	// subtract oci from symmetry databrick for src
+      it->second.fresh = 1;
+
+      if (is_attack[s_bucket] && reported[s_bucket] == 0)
 	{
-	  cells.insert(pair<long,cell>(i,c));
+	  flow_t rflow = {flow.dst, flow.dport, flow.src, flow.sport, flow.proto};
+	  
+	  if (match(rflow, signatures[s_bucket].sig))
+	    {
+	      //cout<<"RFlow "<<printsignature(rflow)<<" matches "<<printsignature(signatures[s_bucket].sig)<<endl;
+	      if (signatures[s_bucket].reverseflows.find(rflow) == signatures[s_bucket].reverseflows.end())
+		{
+		  signatures[s_bucket].reverseflows.insert(pair<flow_t, int>(rflow,0));
+		}
+	      if (oci == 0)
+		signatures[s_bucket].reverseflows[rflow] ++;
+	      else
+		signatures[s_bucket].reverseflows[rflow] += abs(oci);
+	    }
 	}
-      cells[i].databrick_p[d_bucket] += len;	// add bytes to payload databrick for dst
-      cells[i].databrick_s[d_bucket] += oci;	// add oci to symmetry databrick for dst
-      cells[i].databrick_s[s_bucket] -= oci;	// subtract oci from symmetry databrick for src
-      //cells[i].wfilter_p[d_bucket] += len;	// add bytes to payload databrick for dst
-      //cells[i].wfilter_s[d_bucket] += oci;	// add oci to symmetry databrick for dst
-      ///cells[i].wfilter_s[s_bucket] -= oci;	// subtract oci from symmetry databrick for src
-      cells[i].fresh = 1;
       
-      if (is_attack[d_bucket])
+      if (is_attack[d_bucket] && reported[d_bucket] == 0)
 	{
 	  if (match(flow, signatures[d_bucket].sig))
 	    {
-	      /* Project how much traffic would be dropped */
+	      //cout<<"Flow "<<printsignature(flow)<<" matches "<<printsignature(signatures[d_bucket].sig)<<endl;
+	      if (signatures[d_bucket].matchedflows.find(flow) == signatures[d_bucket].matchedflows.end())
+		{
+		  signatures[d_bucket].matchedflows.insert(pair<flow_t, int>(flow,0));
+		}
 	      if (oci == 0)
-		signatures[d_bucket].goodflows += 1;
+		signatures[d_bucket].matchedflows[flow] ++;
 	      else
-		signatures[d_bucket].badflows += oci;
+		signatures[d_bucket].matchedflows[flow] += abs(oci);
+	    }
+	  
+	  /* Decide if this is really an attack worth reporting, i.e., 
+	     its signature will filter out asymmetric flows but not too 
+	     many symmetric ones */
+	  if (signatures[d_bucket].matchedflows.size() == SIG_FLOWS)
+	    {
+	      int good = 0, bad = 0;
+	      
+	      for(map <flow_t, int>::iterator mit = signatures[d_bucket].matchedflows.begin(); mit != signatures[d_bucket].matchedflows.end(); mit++)
+		{
+		  if (signatures[d_bucket].reverseflows.find(mit->first) != signatures[d_bucket].reverseflows.end())
+		    {
+		      good += signatures[d_bucket].reverseflows[mit->first];
+		      int d = mit->second - signatures[d_bucket].reverseflows[mit->first];
+		      if (d < 0)
+			d = 0;
+		      bad += d;
+		    }
+		  else
+		    bad += mit->second;
+		}
+	      cout<<"AT"<<d_bucket<<" good "<<good<<" bad "<<bad<<" sig "<<printsignature(signatures[d_bucket].sig)<<endl;
+	      if ((float)good/(good+bad) < SPEC_THRESH)
+		    {
+		      long t = signatures[d_bucket].timestamp;
+		      float rate = (float)signatures[d_bucket].vol*8/1024/1024/1024/interval;
+	      	      cout <<"Attack detected in destination bin " << d_bucket << " time " << t <<" vol "<<rate<<" Gbps oci "<<signatures[d_bucket].oci<<" good dropped "<< good<<" bad dropped "<<bad<<endl;
+		      cout<<"Signature "<<printsignature(signatures[d_bucket].sig)<<endl;
+		      
+		      /* Dump alert into a file */
+		      ofstream out;
+		      out.open("alerts.txt", std::ios_base::app);
+		      out<<"START "<<d_bucket<<" "<<t<<" "<<rate;
+		      out<<" "<<signatures[d_bucket].oci<<" ";
+		      out<<good<<" "<<bad;
+		      out<<" "<<printsignature(signatures[d_bucket].sig)<<endl;
+		      out.close();
+		      reported[d_bucket] = 1;
+		    }
+	    }
+	}
+      if (reported[d_bucket] == 1)
+	{
+	  if (match(flow, signatures[d_bucket].sig))
+	    {
+	      //cout<<"Filtering flow "<<printsignature(flow)<<" for bucket "<<d_bucket<<endl;
 	      /* Undo changes for wfilter */
-	      //cells[i].wfilter_p[d_bucket] -= len;	
-	      //cells[i].wfilter_s[d_bucket] -= oci;	
-	      //cells[i].wfilter_s[s_bucket] += oci;	
+	      it->second.wfilter_p[d_bucket] -= len;	
+	      it->second.wfilter_s[d_bucket] -= oci;	
+	      it->second.wfilter_s[s_bucket] += oci;
 	    }
 	}
       if ((error = pthread_mutex_unlock (&cells_lock)))
@@ -536,7 +599,6 @@ amonProcessing(flow_t flow, int len, long start, long end, int oci, char* line)
 		   error);
 	  exit (-1);
 	}
-      /*
 	if ((error = pthread_mutex_lock (&samples_lock)))
 	  {
 	    fprintf (stderr,
@@ -544,11 +606,9 @@ amonProcessing(flow_t flow, int len, long start, long end, int oci, char* line)
 		     error);
 	    exit (-1);
 	  }
-      */
 
 	flow_p f={start, end, len, oci, flow};
 	addSample(d_bucket, f, i);
-	/*
 	if ((error = pthread_mutex_unlock (&samples_lock)))
 	  {
 	    fprintf (stderr,
@@ -556,7 +616,6 @@ amonProcessing(flow_t flow, int len, long start, long end, int oci, char* line)
 		     error);
 	    exit (-1);
 	  }
-      */
     }
 }
 
@@ -567,7 +626,7 @@ amonProcessingNfdump (char* line, long time)
   /* 2|1453485557|768|1453485557|768|6|0|0|0|2379511808|44694|0|0|0|2792759296|995|0|0|0|0|2|0|1|40 */
   // Get start and end time of a flow
   char* tokene;
-  char saveline[MAX_LINE];
+  char saveline[MAXLEN];
   memcpy(saveline, line, strlen(line));
   parse(line,'|', &delimiters);
   long start = strtol(line+delimiters[0], &tokene, 10);
@@ -629,6 +688,7 @@ amonProcessingNfdump (char* line, long time)
   else
     // unknown, do nothing
     oci=0;
+
   amonProcessing(flow, bytes, start, end, oci, saveline);
 }
 
@@ -688,25 +748,28 @@ enum dim{vol, sym};
 double stats[2][3][2][BRICK_DIMENSION]; /* statistics for attack detection, 
 first dim - CUR, HIST, second dim - N, AVG, SS, third dim - VOL, SYM */
 
-struct record
-{
-  unsigned int timestamp;
-  double avgv;
-  double avgs;
-  double stdv;
-  double stds;
-  double valv;
-  double vals;
-};
 /* Circular array of records so that when we detect attacks we 
    can generate useful info */
-record records[HIST_LEN][BRICK_DIMENSION];
+int records_p[BRICK_DIMENSION][HIST_LEN];
+int records_s[BRICK_DIMENSION][HIST_LEN];
 int ri=0;
 
+void minmax(int* array, int len, int &min, int &max)
+{
+  min = ~(int)0;
+  max = 0;
+  for (int i=0; i<len; i++)
+    {
+      if(array[i] < min)
+	min = array[i];
+      if(array[i] > max)
+	max = array[i];
+    }
+}
 
-//=================================================================//
+//=======================================================================//
 //===== Function to detect values higher than mean + NUMSTD * stdev ====//
-//=================================================================//
+//=====================================================================//
 int abnormal(int type, int index, unsigned int timestamp)
 {
   double mean = stats[hist][avg][type][index];
@@ -736,29 +799,27 @@ void detect_attack(long timestamp)
       double avgs = stats[hist][avg][sym][i];
       double stds = sqrt(stats[hist][ss][sym][i]/(stats[hist][n][sym][i]-1));
 
-      records[ri][i].timestamp = timestamp;
-      records[ri][i].avgv = avgv;     
-      records[ri][i].avgs = avgs;
-      records[ri][i].stdv = stdv;
-      records[ri][i].stds = stds;
-      records[ri][i].valv = cells[timestamp].databrick_p[i];
-      records[ri][i].vals = cells[timestamp].databrick_s[i];
-
-      debug[i]<<records[ri][i].timestamp<<" "<<records[ri][i].avgv<<" ";
-      debug[i]<<records[ri][i].stdv<<" "<<records[ri][i].valv<<" ";
-      debug[i]<<records[ri][i].avgs<<" "<<records[ri][i].stds<<" ";
-      debug[i]<<records[ri][i].vals<<" ";
-      //debug[i]<<cells[timestamp].wfilter_p[i]<<"  ";
-      //debug[i]<<cells[timestamp].wfilter_s[i]<<"  ";
+      if (!abnormal(vol, i, timestamp) && !abnormal(sym, i, timestamp))
+	{
+	  ri = (ri + 1) % HIST_LEN;
+	  records_p[i][ri] = cells[timestamp].databrick_p[i];
+	  records_s[i][ri] = cells[timestamp].databrick_s[i];
+	}
+      int min_p, max_p;
+      int min_s, max_s;
+      minmax((int*)(records_p[i]), HIST_LEN, min_p, max_p);
+      minmax((int*)(records_s[i]), HIST_LEN, min_s, max_s);
+      
+      debug[i]<<timestamp<<" "<<avgv<<" ";
+      debug[i]<<stdv<<" "<<cells[timestamp].databrick_p[i]<<" ";
+      debug[i]<<avgs<<" "<<stds<<" ";
+      debug[i]<<cells[timestamp].databrick_s[i]<<" ";
+      debug[i]<<cells[timestamp].wfilter_p[i]<<"  ";
+      debug[i]<<cells[timestamp].wfilter_s[i]<<"  ";
+      debug[i]<<min_p<<" "<<max_p<<" ";
+      debug[i]<<min_s<<" "<<max_s<<" ";
       debug[i]<<is_attack[i]<<endl;
       
-      if (is_attack[i])
-	{
-	  outfiles[i] <<records[ri][i].timestamp<<" "<<records[ri][i].avgv<<" ";
-	  outfiles[i] <<records[ri][i].stdv<<" "<<records[ri][i].valv<<" ";
-	  outfiles[i] <<records[ri][i].avgs<<" "<<records[ri][i].stds<<" ";
-	  outfiles[i] <<records[ri][i].vals<<" 1"<<endl;
-	}
       if (training_done && abnormal(vol, i, timestamp) && abnormal(sym, i, timestamp))
 	{
 	  if (is_abnormal[i] < int(ATTACK_HIGH/interval))
@@ -773,70 +834,40 @@ void detect_attack(long timestamp)
 	    {
 	      /* Signal attack detection */
 	      is_attack[i] = 1;
+	      cout<<"-----> AT"<<i<<" possible attack"<<endl;
+	      reported[i] = 0;
 
 	      // Find closest timestamp and calculate signatures
 	      long t = calcSignature(timestamp, i, s);
 
-	      // Open signature file
-	      ofstream sout;
-	      sprintf(filename,"%d.%u.sig", i, t);
-	      sout.open(filename);
-
 	      // Find best signature
-	      sig_b bestsig = {0,0,0,0,0};
-	      int vol = 0;
+	      flow_t bestsig = {0,0,0,0,0};
 	      int oci = 0;
-	      double volp = 0;
-	      double ocip = 0;
+	      int maxoci = 0;
 	      
-	      for (map<sig_b,stat_r>::iterator sit = samples[t][i].signatures.begin(); sit != samples[t][i].signatures.end(); sit++)
+	      for (map<flow_t,stat_r>::iterator sit = samples[t].bins[i].signatures.begin(); sit != samples[t].bins[i].signatures.end(); sit++)
 		{
 		  // Print out each signature for debugging
-		  sout<<"Best "<<i<<" "<<printsignature(sit->first)<<" v="<<sit->second.vol<<"("<<sit->second.volp<<") o="<<sit->second.oci<<" ("<<sit->second.ocip<<")"<<endl;
-		  if (abs(samples[t][i].signatures[sit->first].oci) > abs(oci) ||
-		      (samples[t][i].signatures[sit->first].oci == oci && bettersig(sit->first, bestsig)))
+		  cout<<"AT"<<i<<" candidate "<<printsignature(sit->first)<<" v="<<sit->second.vol<<"("<<sit->second.volp<<") o="<<sit->second.oci<<" ("<<sit->second.ocip<<")"<<endl;
+		  if (abs(samples[t].bins[i].signatures[sit->first].oci) > abs(maxoci))
+		    maxoci = samples[t].bins[i].signatures[sit->first].oci;
+		  if (abs(samples[t].bins[i].signatures[sit->first].oci) > HMB*abs(oci) ||
+		      (HMB*abs(samples[t].bins[i].signatures[sit->first].oci) > maxoci && bettersig(sit->first, bestsig)))
 		    {
 		      bestsig = sit->first;
-		      vol = sit->second.vol;
 		      oci = sit->second.oci;
-		      volp = sit->second.volp;
-		      ocip = sit->second.ocip;
 		    }
 		}
-	      // Remember the signature
-	      stat_f sf = {bestsig,0,0};
-	      signatures.insert(pair<int, stat_f>(i,sf));
-	      sout<<"Best "<<i<<" "<<printsignature(bestsig)<<" v="<<vol<<"("<<volp<<") o="<<oci<<" ("<<ocip<<")"<<endl;
-	      sout.close();
-	      cout <<" Attack detected in destination bin " << i << " time " << timestamp <<" mean "<<avgv<<" + 5*"<< stdv<<" < "<<cells[timestamp].databrick_p[i]<<" and "<<avgs<<" +- 5*"<<stds<<" inside "<<cells[timestamp].databrick_s[i]<<" flag "<<is_attack[i]<<endl;
-	      cout<<"Best "<<i<<" "<<printsignature(bestsig)<<" v="<<vol<<"("<<volp<<") o="<<oci<<" ("<<ocip<<")"<<endl;
-
-	      /* Dump records into a file */
-	      ofstream out;
-	      out.open("alerts.txt", std::ios_base::app);
-	      float volume = float(cells[timestamp].databrick_p[i])*8/1024/1024/1024;
-	      out << "START "<<i<<" "<<timestamp<<" vol "<<volume<<" Gbps"<<endl;
-	      out.close();
-	      sprintf(filename,"%d.log.%u", i, timestamp);
-	      outfiles[i].close();
-	      outfiles[i].open(filename);
-	      for (int j = (ri+1)%HIST_LEN; j != ri; )
+	      if (samples.find(t) != samples.end())
+		samples.erase(t);
+	      // Remember the signature if it is not empty
+	      if (!empty(bestsig))
 		{
-		  if (records[j][i].timestamp > 0)
-		    {
-			  outfiles[i] <<records[j][i].timestamp<<" "<<records[j][i].avgv<<" ";
-			  outfiles[i] <<records[j][i].stdv<<" "<<records[j][i].valv<<" ";
-			  outfiles[i] <<records[j][i].avgs<<" "<<records[j][i].stds<<" ";
-			  outfiles[i] <<records[j][i].vals<<" 0"<<endl;
-		    }
-		  j++;
-		  if (j == HIST_LEN)
-		    j = 0;
+		  map <flow_t, int> m1, m2;
+		  cout<<"AT"<<i<<" best sig "<<printsignature(bestsig)<<" Empty? "<<empty(bestsig)<<endl;
+		  stat_f sf = {timestamp, cells[timestamp].databrick_p[i], cells[timestamp].databrick_s[i], bestsig,m1,m2};
+		  signatures.insert(pair<int, stat_f>(i,sf));
 		}
-	      outfiles[i] <<records[ri][i].timestamp<<" "<<records[ri][i].avgv<<" ";
-	      outfiles[i] <<records[ri][i].stdv<<" "<<records[ri][i].valv<<" ";
-	      outfiles[i] <<records[ri][i].avgs<<" "<<records[ri][i].stds<<" ";
-	      outfiles[i] <<records[ri][i].vals<<" 1"<<endl;
 	    }
 	}
       else if (training_done && !abnormal(vol, i, timestamp) && !abnormal(sym, i, timestamp))
@@ -846,16 +877,17 @@ void detect_attack(long timestamp)
 	      is_abnormal[i] --;
 	      cout<<timestamp<<" NOT abnormal for "<<i<<" points "<<is_abnormal[i]<<endl;
 	    }
-	  if (is_attack[i] > 0 && is_abnormal[i] == 0)
+	  if (is_attack[i] > 0 && is_abnormal[i] == 0 && reported[i] > 0)
 	    {
 	      /* Signal end of attack */
-	      cout <<" Attack has stopped in destination bin "<< i << " time " << timestamp <<" good dropped "<<signatures[i].goodflows<<" bad dropped "<<signatures[i].badflows<<endl;
+	      //cout <<" Attack has stopped in destination bin "<< i << " time " << timestamp <<" good dropped "<<signatures[i].goodflows<<" bad dropped "<<signatures[i].badflows<<endl;
 	      ofstream out;
 	      out.open("alerts.txt", std::ios_base::app);
-	      out << "STOP "<<i<<" "<<timestamp<<" "<<signatures[i].goodflows<<" "<<signatures[i].badflows<<endl;
+	      out << "STOP "<<i<<" "<<timestamp<<endl;
 	      out.close();
 	      signatures.erase(i);
 	      is_attack[i] = 0;
+	      reported[i] = 0;
 	    }
 	}
     }
@@ -902,8 +934,8 @@ void update_dst_arrays(long timestamp)
     }
   if (timestamp - statstime >= MIN_TRAIN && training_done)
     {
+      cout<<"========================> Updating means "<<timestamp<<" statstime "<<statstime<<endl;
       statstime = timestamp;
-      cout<<"========================> Updating means "<<endl;
       for (int j = n; j <= ss; j++)
 	for (int k = vol; k <= sym; k++)
 	  {
@@ -937,25 +969,28 @@ reset_transmit (void *passed_params)
 		   error);
 	  exit (-1);
 	}
-
       // Find timestamps that are not fresh
-      for (map<long,cell>::iterator it=cells.begin(); it != cells.end(); it++)
+      for (map<long,cell>::iterator it=cells.begin(); it != cells.end(); )
 	{
 	  curtime = it->first;
+	  int diff = curtime - firsttime;
+
+
 	  if (it->second.fresh || fresh)
 	    {
 	      if (fresh == 0)
 		{
-		  int diff = curtime - firsttime;
-		  cout<<"Reset "<<training_done<<" curtime "<<curtime<<" first "<<firsttime<<" diff "<<diff<<endl;
-		  if(diff > MIN_TRAIN)
+		  if(diff > MIN_TRAIN && !training_done)
 		    {
 		      training_done = 1;
 		      statstime = curtime;
 		    }
 		  fresh = 1;
+		  cout<<"Reset "<<training_done<<" curtime "<<curtime<<" first "<<firsttime<<" diff "<<diff<<" cells "<<cells.size()<<" fresh "<<it->second.fresh<<" global fresh "<<fresh<<endl;
+
 		}
-	      cells[it->first].fresh = 0;
+	      it->second.fresh = 0;
+	      it++;
 	      continue;
 	    }
 	  if (!training_done)
@@ -967,9 +1002,9 @@ reset_transmit (void *passed_params)
 		    {
 		      int data;
 		      if (j == vol)
-			data = cells[it->first].databrick_p[i];				 
+			data = it->second.databrick_p[i];				 
 		      else
-			data = cells[it->first].databrick_s[i];
+			data = it->second.databrick_s[i];
 		      // Update avg and ss
 		      stats[hist][n][j][i] += 1;
 		      if (stats[hist][n][j][i] == 1)
@@ -992,8 +1027,9 @@ reset_transmit (void *passed_params)
 	      detect_attack(it->first);
 	      update_dst_arrays(it->first);
 	    }
+	  if (samples.find(it->first) != samples.end())
+	  samples.erase(it->first);
 	  cells.erase(it++);
-	  samples.erase(curtime);
 	}
       if ((error = pthread_mutex_unlock (&cells_lock)))
 	{
@@ -1334,7 +1370,6 @@ main (int argc, char *argv[])
 		if (num_pcap_pkts == 0)
 		  {
 		    curTime = h->ts.tv_sec;
-		    dbTime = 0;
 		    beginning.tv_sec = h->ts.tv_sec;
 		    beginning.tv_usec = h->ts.tv_usec;
 		    printf ("First packet seen at %ld\n",
@@ -1350,6 +1385,7 @@ main (int argc, char *argv[])
 	  {
 	    char line[MAX_LINE];
 	    cout<<"Trying to read from "<<nf<<endl;
+	    firsttimeinfile = 0;
 	    while (fgets(line, MAX_LINE, nf) != NULL)
 	      {
 		// Check that this is the line with a flow
@@ -1374,10 +1410,12 @@ main (int argc, char *argv[])
 			    beginning.tv_sec * 1L);
 		  }
 		num_pcap_pkts++;
+		if (firsttimeinfile == 0)
+		  firsttimeinfile = epoch;
 		amonProcessingNfdump(line, epoch);
 	      }
 	  }     
-	printf("Done with the file\n");
+	cout<<"------> Done with the file "<<time(0)<<endl;
       }
     }
   return 0;			// Exit program
