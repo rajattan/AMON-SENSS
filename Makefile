@@ -27,7 +27,7 @@ O_FLAG     = -O2 -DHAVE_PF_RING
 # CROSS_COMPILE=arm-mv5sft-linux-gnueabi-
 #-std=gnu9
 CC         = ${CROSS_COMPILE}g++
-CFLAGS     =  ${O_FLAG} -Wall -std=gnu99 ${DNA_DEFINE} -D HAVE_ZERO -D ENABLE_BPF -D HAVE_LIBNUMA -D HAVE_PTHREAD_SETAFFINITY_NP -O2  -g -pg -std=c++0x
+CFLAGS     =  ${O_FLAG} -Wall -std=gnu99 ${DNA_DEFINE} -D HAVE_ZERO -D ENABLE_BPF -D HAVE_LIBNUMA -D HAVE_PTHREAD_SETAFFINITY_NP  -g -pg -std=c++0x
 # LDFLAGS  =
 
 #

@@ -29,11 +29,12 @@ using namespace std;
 #define ATTACK_HIGH 60  /* Make this a configurable param */
 #define HIST_LEN 3600    /* How long we remember history */
 #define MIN_TRAIN 3600
+#define MIN_OCI 1000
 #define NUMSTD 5
 #define MAX_SAMPLES 100
 #define MIN_SAMPLES 2
 #define MAX_FLOW_SIZE 10000;
-#define FILTER_THRESH 0.0
+#define FILTER_THRESH 0.5
 #define SIG_FLOWS 100
 #define SPEC_THRESH 0.05
 #define MAX_DIFF 10
@@ -72,6 +73,11 @@ struct flow_t{
     else
       return false;
   }
+
+   bool operator==(const flow_t& rhs) const
+  {
+    return (src == rhs.src) && (dst == rhs.dst) && (sport == rhs.sport) && (dport == rhs.dport) && (proto == rhs.proto);
+  }
 };
 
 struct indic{
@@ -107,11 +113,12 @@ struct stat_f
   flow_t sig;
   map <flow_t,int> matchedflows;
   map <flow_t,int> reverseflows;
+  int nflows;
 };
 
 struct sample_p
 {
-  vector<flow_p> flows;
+  map<int, flow_p> flows;
   map<flow_t,stat_r> signatures;
 };
 
