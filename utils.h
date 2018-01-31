@@ -11,6 +11,9 @@
 
 using namespace std;
 
+#define REPORT_THRESH 30
+#define MIN_FLOWS 100000
+#define MIN_FRESH 10
 #define HMB 1.1
 #define FILE_INTERVAL 3600 
 #define TIMEZONE_ADJUST 5*3600
@@ -86,6 +89,7 @@ struct indic{
   long timestamp;
 };
 
+
 struct flow_p
 {
   long start;
@@ -93,6 +97,12 @@ struct flow_p
   int len;
   int oci;
   flow_t flow;
+};
+
+struct time_flow
+{
+  vector<flow_p> flows;
+  int fresh;
 };
 
 struct stat_r

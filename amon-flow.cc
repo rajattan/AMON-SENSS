@@ -137,11 +137,12 @@ int reported[BRICK_DIMENSION];
 int is_abnormal[BRICK_DIMENSION]; 
 ofstream outfiles[BRICK_DIMENSION];
 
-
+map<long, time_flow> timeflows;
 map<long,cell> cells;
 map<long,sample> samples;
 map<int,stat_f> signatures;
 long firsttime = 0;    /* Beginning of trace */
+long freshtime = 0;    /* Where we last ended when processing data */
 long firsttimeinfile = 0; /* First time in the current file */
 long updatetime = 0;   /* Time of last update */
 long statstime = 0;    /* Time when we move the stats to history */
@@ -150,11 +151,24 @@ char filename[MAXLEN];
 int print = 0;
 
 pthread_mutex_t cells_lock = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t samples_lock = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t indicator_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t flows_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* Make sure we don't fire if data is not ready */
 pthread_mutex_t time_sync_lock = PTHREAD_MUTEX_INITIALIZER;
+
+
+/* Types of statistics. If this changes, update the entire section */
+enum period{cur, hist};
+enum type{n, avg, ss};
+enum dim{vol, sym};
+double stats[2][3][2][BRICK_DIMENSION]; /* statistics for attack detection, 
+first dim - CUR, HIST, second dim - N, AVG, SS, third dim - VOL, SYM */
+
+/* Circular array of records so that when we detect attacks we 
+   can generate useful info */
+int records_p[BRICK_DIMENSION][HIST_LEN];
+int records_s[BRICK_DIMENSION][HIST_LEN];
+int ri=0;
 
 
 struct passingThreadParams
@@ -424,310 +438,103 @@ int malformed(long timestamp)
 void
 amonProcessing(flow_t flow, int len, long start, long end, int oci)
 {
-  int d_bucket = 0, s_bucket = 0;	    /* indices for the databrick */
-  int error;
   unsigned int payload;
 
   // Detect if the flow is malformed and reject it
   if (malformed(start) || malformed(end))
     return;
+
+  //cout<<"AP "<<start<<" "<<end<<endl;
+  // Just link the flow into the structure and process
+  // when it is ready. For flows that last a long time
+  // multiply the flow and insert into each time interval
   
-  s_bucket = sha_hash(flow.src); /* Jelena: should add  & mask */
-  d_bucket = sha_hash(flow.dst); /* Jelena: should add  & mask */
 
   // Standardize time
   start = int(start / interval)*interval;
   end = int(end / interval)*interval;
-
-  // One empty cell
-  cell c;
-  memset(c.databrick_p, 0, BRICK_DIMENSION*sizeof(unsigned int));
-  memset(c.databrick_s, 0, BRICK_DIMENSION*sizeof(int));
-  memset(c.wfilter_p, 0, BRICK_DIMENSION*sizeof(unsigned int));
-  memset(c.wfilter_s, 0, BRICK_DIMENSION*sizeof(int));
+  
+  int error;
+  if ((error = pthread_mutex_lock (&flows_lock)))
+    {
+      fprintf (stderr,
+	       "Error Number %d For Acquiring Lock. FATAL ERROR. \n",
+	       error);
+      exit (-1);
+    }
 
   for (long i = start; i <= end; i+= interval)
     {
-        int error;
-	if ((error = pthread_mutex_lock (&cells_lock)))
-	  {
-	    fprintf (stderr,
-		     "Error Number %d For Acquiring Lock. FATAL ERROR. \n",
-		     error);
-	    exit (-1);
-	  }
-
-	map<long,cell>::iterator it = cells.find(i);
-	if (it == cells.end())
-	  {
-	    cells.insert(pair<long,cell>(i,c));
-	    it = cells.find(i);
-	  }
-	it->second.databrick_p[d_bucket] += len;	// add bytes to payload databrick for dst
-	it->second.databrick_s[d_bucket] += oci;	// add oci to symmetry databrick for dst
-	it->second.databrick_s[s_bucket] -= oci;	// subtract oci from symmetry databrick for src
-	it->second.wfilter_p[d_bucket] += len;	// add bytes to payload databrick for dst
-	it->second.wfilter_s[d_bucket] += oci;	// add oci to symmetry databrick for dst
-	it->second.wfilter_s[s_bucket] -= oci;	// subtract oci from symmetry databrick for src
-	it->second.fresh = 1;
-
-	if (is_attack[s_bucket] && reported[s_bucket] == 0)
-	  {
-	    flow_t rflow = {flow.dst, flow.dport, flow.src, flow.sport, flow.proto};
-	    
-	    if (match(rflow, signatures[s_bucket].sig))
-	      {
-		//cout<<"RFlow "<<printsignature(rflow)<<" matches "<<printsignature(signatures[s_bucket].sig)<<endl;
-		if (signatures[s_bucket].reverseflows.find(rflow) == signatures[s_bucket].reverseflows.end())
-		  {
-		    signatures[s_bucket].reverseflows.insert(pair<flow_t, int>(rflow,0));
-		  }
-		if (oci == 0)
-		  signatures[s_bucket].reverseflows[rflow] ++;
-		else
-		  signatures[s_bucket].reverseflows[rflow] += abs(oci);
-	      }
-	  }
-	
-	if (is_attack[d_bucket] && reported[d_bucket] == 0)
-	  {
-	    if (match(flow, signatures[d_bucket].sig))
-	      {
-		signatures[d_bucket].nflows++;
-		if (d_bucket == 114)
-		  cout<<"AT"<<d_bucket<<" Flow "<<printsignature(flow)<<" and sig is "<<printsignature(signatures[d_bucket].sig)<<" matched"<<signatures[d_bucket].nflows<<endl;
-		if (signatures[d_bucket].matchedflows.find(flow) == signatures[d_bucket].matchedflows.end())
-		  {
-		    signatures[d_bucket].matchedflows.insert(pair<flow_t, int>(flow,0));
-		  }
-		if (oci == 0)
-		  signatures[d_bucket].matchedflows[flow] ++;
-		else
-		  signatures[d_bucket].matchedflows[flow] += abs(oci);
-	      
-		
-		/* Decide if this is really an attack worth reporting, i.e., 
-		   its signature will filter out asymmetric flows but not too 
-		   many symmetric ones */
-		if (signatures[d_bucket].nflows >= SIG_FLOWS)
-		  {
-		    int good = 0, bad = 0;
-		    
-		    for(map <flow_t, int>::iterator mit = signatures[d_bucket].matchedflows.begin(); mit != signatures[d_bucket].matchedflows.end(); mit++)
-		      {
-			// Symmetry makes a flow good only if it is UDP or TCP+PSH
-			if (signatures[d_bucket].reverseflows.find(mit->first) != signatures[d_bucket].reverseflows.end() &&
-			    mit->first.proto == UDP || (mit->first.proto == TCP && mit->second == 0))
-			  {
-			    good += signatures[d_bucket].reverseflows[mit->first];
-			    int d = mit->second - signatures[d_bucket].reverseflows[mit->first];
-			    if (d < 0)
-			      d = 0;
-			    bad += d;
-			  }
-			else
-			  bad += mit->second;
-		      }
-		    cout<<"AT"<<d_bucket<<" good "<<good<<" bad "<<bad<<" sig "<<printsignature(signatures[d_bucket].sig)<<endl;
-		    if ((float)good/(good+bad) < SPEC_THRESH)
-		      {
-			long t = signatures[d_bucket].timestamp;
-			float rate = (float)signatures[d_bucket].vol*8/1024/1024/1024/interval;
-			cout <<"Attack detected in destination bin " << d_bucket << " time " << t <<" vol "<<rate<<" Gbps oci "<<signatures[d_bucket].oci<<" good dropped "<< good<<" bad dropped "<<bad<<endl;
-			cout<<"Signature "<<printsignature(signatures[d_bucket].sig)<<endl;
-			
-			/* Dump alert into a file */
-			ofstream out;
-			out.open("alerts.txt", std::ios_base::app);
-			out<<"START "<<d_bucket<<" "<<t<<" "<<rate;
-			out<<" "<<signatures[d_bucket].oci<<" ";
-			out<<good<<" "<<bad;
-			out<<" "<<printsignature(signatures[d_bucket].sig)<<endl;
-			out.close();
-			reported[d_bucket] = 1;
-		      }
-		    else
-		      {
-			/* Try again Mr Noodle */
-			cout<<"AT"<<d_bucket<<" erasing signature 2"<<endl;
-			is_attack[d_bucket] = 0;
-			signatures.erase(d_bucket);
-		      }
-		  }
-	      }
-	  }
-	if (reported[d_bucket] == 1)
-	  {	
-	    if (match(flow, signatures[d_bucket].sig))
-	      {
-		//cout<<"Filtering flow "<<printsignature(flow)<<" for bucket "<<d_bucket<<endl;
-		/* Undo changes for wfilter */
-		it->second.wfilter_p[d_bucket] -= len;	
-		it->second.wfilter_s[d_bucket] -= oci;	
-		it->second.wfilter_s[s_bucket] += oci;
-	      }
-	  }
-	
-	if (!is_attack[d_bucket] && training_done && oci != 0 && sgn(oci) == sgn(it->second.databrick_s[d_bucket]))
-	  {
-	    flow_p f={start, end, len, oci, flow};
-	    addSample(d_bucket, f, i);
-	  }
-	if ((error = pthread_mutex_unlock (&cells_lock)))
-	  {
-	    fprintf (stderr,
-		     "Error Number %d For Releasing Lock. FATAL ERROR. \n",
-		     error);
-	    exit (-1);
-	  }
-
+      if (i < freshtime)
+	continue;
+      map<long,time_flow>::iterator it = timeflows.find(i);
+      if (it == timeflows.end())
+	{
+	  time_flow tf;
+	  tf.fresh = 0;
+	  timeflows.insert(pair<long,time_flow>(i,tf));	  
+	  it = timeflows.find(i);
+	}
+      flow_p f={start, end, len, oci, flow};
+      it->second.flows.push_back(f);
+      it->second.fresh++;
+    }
+  if ((error = pthread_mutex_unlock (&flows_lock)))
+    {
+      fprintf (stderr,
+	       "Error Number %d For Releasing Lock. FATAL ERROR. \n",
+	       error);
+      exit (-1);
     }
 }
 
-
-void
-amonProcessingNfdump (char* line, long time)
+void update_dst_arrays(long timestamp)
 {
-  /* 2|1453485557|768|1453485557|768|6|0|0|0|2379511808|44694|0|0|0|2792759296|995|0|0|0|0|2|0|1|40 */
-  // Get start and end time of a flow
-  char* tokene;
-  char saveline[MAXLEN];
-  parse(line,'|', &delimiters);
-  long start = strtol(line+delimiters[0], &tokene, 10);
-  long end = strtol(line+delimiters[2], &tokene, 10);
-  int dur = end - start;
-  // Normalize duration
-  if (dur < 0)
-    dur = 0;
-  if (dur > 3600)
-    dur = 3600;
-  int pkts, bytes;
-
-  /* Get source and destination IP and port and protocol */
-  flow_t flow = {0,0,0,0};
-  /* 2|1453485557|768|1453485557|768|6|0|0|0|2379511808|44694|0|0|0|2792759296|995|0|0|0|0|2|0|1|40 */
-  int proto = atoi(line+delimiters[4]);
-  flow.src = strtol(line+delimiters[8], &tokene, 10);
-  flow.sport = atoi(line+delimiters[9]); // sport
-  flow.dst = strtol(line+delimiters[13], &tokene, 10);
-  flow.dport = atoi(line+delimiters[14]); // dport
-  flow.proto = proto;
-  int flags = atoi(line+delimiters[19]);
-  pkts = atoi(line+delimiters[21]);
-  pkts = (int)(pkts/(dur+1))+1;
-  bytes = atoi(line+delimiters[22]);
-  bytes = (int)(bytes/(dur+1))+1;
-
-  /* Is this outstanding connection? For TCP, connections without 
-     PUSH are outstanding. For UDP, connections that have a request
-     but not a reply are outstanding. Because bidirectional flows
-     may be broken into two unidirectional flows we have values of
-     0, -1 and +1 for outstanding connection indicator or oci. For 
-     TCP we use 0 (there is a PUSH) or 1 (no PUSH) and for UDP/ICMP we 
-     use +1 for requests and -1 for replies. */
-  int oci;
-  if (proto == TCP)
+  if (timestamp <= updatetime)
+      return;
+  if (training_done)
     {
-      // There is a PUSH flag
-      if ((flags & 8) > 0)
-	oci = 0;
-      else
-	oci = 1;
+      for (int i=0;i<BRICK_DIMENSION;i++)
+	{
+	  for (int j=vol; j<=sym; j++)
+	    {
+	      int data;
+	      if (j == vol)
+		data = cells[timestamp].databrick_p[i];
+	      else
+		data = cells[timestamp].databrick_s[i];
+	      /* Only update if everything looks normal */
+	      if (!is_abnormal[i])
+		{
+		  // Update avg and ss
+		  stats[cur][n][j][i] += 1;
+		  if (stats[cur][n][j][i] == 1)
+		    {
+		      stats[cur][avg][j][i] =  data;
+		      stats[cur][ss][j][i] =  0;
+		    }
+		  else
+		    {
+		      int ao = stats[cur][avg][j][i];
+		      stats[cur][avg][j][i] = stats[cur][avg][j][i] + (data - stats[cur][avg][j][i])/stats[cur][n][j][i];
+		      stats[cur][ss][j][i] = stats[cur][ss][j][i] + (data-ao)*(data - stats[cur][avg][j][i]);
+		    }		
+		}
+	    }
+	}
+      updatetime = timestamp;
     }
-  else if (proto == UDP)
+  if (timestamp - statstime >= MIN_TRAIN && training_done)
     {
-      // Quick and dirty check if this is request
-      // or reply
-      // reply, switch src and dst so it can go to the
-      // right databrick
-      if (flow.sport < 1024 && flow.dport >= 1024)
-	oci = -1*pkts;
-      // request
-      else if (flow.sport >= 1024 && flow.dport < 1024)
-	oci = 1*pkts;
-      // unknown, do nothing
-      else
-	oci = 0;
-    }
-  else
-    // unknown, do nothing
-    oci=0;
-
-  amonProcessing(flow, bytes, start, end, oci);
-}
-
-void
-amonProcessingPcap (struct pfring_pkthdr *h, const u_char * p, long time)
-{
-  struct ether_header ehdr;
-  u_short eth_type;
-  struct ip ip;
-  flow_t flow = {0,0,0,0};
-  u_int32_t displ = 0;
-  u_int32_t src_omega;		            /* The SRC IP in its integer representation */
-  u_int32_t dst_omega;		            /* The DST IP in its integer representation */
-  int len = 0;
-
-  memcpy (&ehdr, p, sizeof (struct ether_header));
-  eth_type = ntohs (ehdr.ether_type);
-
-  if (eth_type == 0x8100)
-    {
-      eth_type = (p[16]) * 256 + p[17];
-      displ += 4;
-      p += 4;
-    }
-
-  if (eth_type == 0x0800)
-    {
-      memcpy (&ip, p + sizeof (ehdr),sizeof (struct ip));        
-      src_omega = ntohl (ip.ip_src.s_addr);
-      dst_omega = ntohl (ip.ip_dst.s_addr);
-      /* Find out ports */
-      
-      pfring_parse_pkt((u_char*)p, (struct pfring_pkthdr*)h, 4, 0, 0);
-      if(h->extended_hdr.parsed_pkt.l4_src_port == 0 && h->extended_hdr.parsed_pkt.l4_dst_port == 0)
-      {
-        memset((void*)&h->extended_hdr.parsed_pkt, 0, sizeof(struct pkt_parsing_info));
-        pfring_parse_pkt((u_char*)p, (struct pfring_pkthdr*)h, 4, 0, 0);
-      }
-
-      flow.src = src_omega;
-      flow.dst = dst_omega;
-      flow.sport = h->extended_hdr.parsed_pkt.l4_src_port;
-      flow.dport = h->extended_hdr.parsed_pkt.l4_dst_port;
-      len = h->len;
-      /* TODO handle OCI here */     
-      amonProcessing(flow, len, time, time, 0);
-    }
-}
-
-
-
-
-/* Types of statistics. If this changes, update the entire section */
-enum period{cur, hist};
-enum type{n, avg, ss};
-enum dim{vol, sym};
-double stats[2][3][2][BRICK_DIMENSION]; /* statistics for attack detection, 
-first dim - CUR, HIST, second dim - N, AVG, SS, third dim - VOL, SYM */
-
-/* Circular array of records so that when we detect attacks we 
-   can generate useful info */
-int records_p[BRICK_DIMENSION][HIST_LEN];
-int records_s[BRICK_DIMENSION][HIST_LEN];
-int ri=0;
-
-void minmax(int* array, int len, int &min, int &max)
-{
-  min = ~(int)0;
-  max = 0;
-  for (int i=0; i<len; i++)
-    {
-      if(array[i] < min)
-	min = array[i];
-      if(array[i] > max)
-	max = array[i];
+      cout<<"========================> Updating means "<<timestamp<<" statstime "<<statstime<<endl;
+      statstime = timestamp;
+      for (int j = n; j <= ss; j++)
+	for (int k = vol; k <= sym; k++)
+	  {
+	    // Move cur arrays into hist and zero down cur
+	    memcpy (stats[hist][j][k], stats[cur][j][k], BRICK_DIMENSION * sizeof (double));
+	    memset ((double*)stats[cur][j][k], 0, BRICK_DIMENSION * sizeof (double));
+	  }
     }
 }
 
@@ -751,6 +558,21 @@ int abnormal(int type, int index, unsigned int timestamp)
   else
     return 0;
 }
+
+
+void minmax(int* array, int len, int &min, int &max)
+{
+  min = ~(int)0;
+  max = 0;
+  for (int i=0; i<len; i++)
+    {
+      if(array[i] < min)
+	min = array[i];
+      if(array[i] > max)
+	max = array[i];
+    }
+}
+
 
 void detect_attack(long timestamp)
 {
@@ -870,16 +692,19 @@ void detect_attack(long timestamp)
 	      is_abnormal[i] --;
 	      cout<<timestamp<<" NOT abnormal for "<<i<<" points "<<is_abnormal[i]<<endl;
 	    }
-	  if (is_attack[i] > 0 && is_abnormal[i] == 0 && reported[i] > 0)
+	  if (is_attack[i] > 0 && is_abnormal[i] == 0)
 	    {
 	      /* Signal end of attack */
-	      cout <<" Attack has stopped in destination bin "<< i << " time " << timestamp <<" sig "<<printsignature(signatures[i].sig)<<endl;
-	      ofstream out;
-	      out.open("alerts.txt", std::ios_base::app);
-	      out << "STOP "<<i<<" "<<timestamp<<endl;
-	      out.close();
-	      cout<<"AT"<<i<<" erasing signature 1"<<endl;
-	      signatures.erase(i);
+	      if (reported[i] > 0)
+		{
+		  cout <<" Attack has stopped in destination bin "<< i << " time " << timestamp <<" sig "<<printsignature(signatures[i].sig)<<endl;
+		  ofstream out;
+		  out.open("alerts.txt", std::ios_base::app);
+		  out << "STOP "<<i<<" "<<timestamp<<endl;
+		  out.close();
+		  cout<<"AT"<<i<<" erasing signature 1"<<endl;
+		  signatures.erase(i);
+		}
 	      is_attack[i] = 0;
 	      reported[i] = 0;
 	    }
@@ -890,55 +715,322 @@ void detect_attack(long timestamp)
     ri = 0;
 }
 
-void update_dst_arrays(long timestamp)
+void processFlows(long timestamp)
 {
-  if (timestamp <= updatetime)
-      return;
-  if (training_done)
+  int d_bucket = 0, s_bucket = 0;	    /* indices for the databrick */
+
+  int error = 0;
+  if ((error = pthread_mutex_lock (&cells_lock)))
     {
+      fprintf (stderr,
+	       "Error Number %d For Acquiring Lock. FATAL ERROR. \n",
+	       error);
+      exit (-1);
+    }
+  map<long,cell>::iterator it = cells.find(timestamp);
+  for (vector<flow_p>::iterator fit=timeflows[timestamp].flows.begin();  fit != timeflows[timestamp].flows.end(); fit++)
+    {
+      // One empty cell
+      s_bucket = sha_hash(fit->flow.src); // Jelena: should add  & mask
+      d_bucket = sha_hash(fit->flow.dst); // Jelena: should add  & mask 
+
+
+      if (it == cells.end())
+	{
+	  cell c;
+	  memset(c.databrick_p, 0, BRICK_DIMENSION*sizeof(unsigned int));
+	  memset(c.databrick_s, 0, BRICK_DIMENSION*sizeof(int));
+	  memset(c.wfilter_p, 0, BRICK_DIMENSION*sizeof(unsigned int));
+	  memset(c.wfilter_s, 0, BRICK_DIMENSION*sizeof(int));
+	  
+	  cells.insert(pair<long,cell>(timestamp,c));
+	  it = cells.find(timestamp);
+	}
+      it->second.databrick_p[d_bucket] += fit->len;	// add bytes to payload databrick for dst
+      it->second.databrick_s[d_bucket] += fit->oci;	// add oci to symmetry databrick for dst
+      it->second.databrick_s[s_bucket] -= fit->oci;	// subtract oci from symmetry databrick for src
+      it->second.wfilter_p[d_bucket] += fit->len;	// add bytes to payload databrick for dst
+      it->second.wfilter_s[d_bucket] += fit->oci;	// add oci to symmetry databrick for dst
+      it->second.wfilter_s[s_bucket] -= fit->oci;	// subtract oci from symmetry databrick for src
+      
+      if (is_attack[s_bucket] && reported[s_bucket] == 0)
+	{
+	  flow_t rflow = {fit->flow.dst, fit->flow.dport, fit->flow.src, fit->flow.sport, fit->flow.proto};
+	  
+	  if (match(rflow, signatures[s_bucket].sig))
+	    {
+	      //cout<<"RFlow "<<printsignature(rflow)<<" matches "<<printsignature(signatures[s_bucket].sig)<<endl;
+	      if (signatures[s_bucket].reverseflows.find(rflow) == signatures[s_bucket].reverseflows.end())
+		{
+		  signatures[s_bucket].reverseflows.insert(pair<flow_t, int>(rflow,0));
+		}
+	      if (fit->oci == 0)
+		signatures[s_bucket].reverseflows[rflow] ++;
+	      else
+		signatures[s_bucket].reverseflows[rflow] += abs(fit->oci);
+	    }
+	}
+	
+      if (is_attack[d_bucket] && reported[d_bucket] == 0)
+	{
+	  if (match(fit->flow, signatures[d_bucket].sig))
+	    {
+	      signatures[d_bucket].nflows++;
+	      if (signatures[d_bucket].matchedflows.find(fit->flow) == signatures[d_bucket].matchedflows.end())
+		{
+		  signatures[d_bucket].matchedflows.insert(pair<flow_t, int>(fit->flow,0));
+		}
+	      if (fit->oci == 0)
+		signatures[d_bucket].matchedflows[fit->flow] ++;
+	      else
+		signatures[d_bucket].matchedflows[fit->flow] += abs(fit->oci);
+	      
+	      
+	      // Decide if this is really an attack worth reporting, i.e., 
+	      // its signature will filter out asymmetric flows but not too 
+	      // many symmetric ones 
+	      if (signatures[d_bucket].nflows >= SIG_FLOWS)
+		{
+		  int good = 0, bad = 0;
+		  
+		  for(map <flow_t, int>::iterator mit = signatures[d_bucket].matchedflows.begin(); mit != signatures[d_bucket].matchedflows.end(); mit++)
+		      {
+			// Symmetry makes a flow good only if it is UDP or TCP+PSH
+			if (signatures[d_bucket].reverseflows.find(mit->first) != signatures[d_bucket].reverseflows.end() &&
+			    mit->first.proto == UDP || (mit->first.proto == TCP && mit->second == 0))
+			  {
+			    good += signatures[d_bucket].reverseflows[mit->first];
+			    int d = mit->second - signatures[d_bucket].reverseflows[mit->first];
+			    if (d < 0)
+			      d = 0;
+			    bad += d;
+			  }
+			else
+			  bad += mit->second;
+		      }
+		    cout<<"AT"<<d_bucket<<" good "<<good<<" bad "<<bad<<" sig "<<printsignature(signatures[d_bucket].sig)<<endl;
+		    if ((float)good/(good+bad) < SPEC_THRESH)
+		      {
+			long t = signatures[d_bucket].timestamp;
+			float rate = (float)signatures[d_bucket].vol*8/1024/1024/1024/interval;
+			cout <<"Attack detected in destination bin " << d_bucket << " time " << t <<" vol "<<rate<<" Gbps oci "<<signatures[d_bucket].oci<<" good dropped "<< good<<" bad dropped "<<bad<<endl;
+			cout<<"Signature "<<printsignature(signatures[d_bucket].sig)<<endl;
+			
+			// Dump alert into a file 
+			ofstream out;
+			out.open("alerts.txt", std::ios_base::app);
+			out<<"START "<<d_bucket<<" "<<t<<" "<<rate;
+			out<<" "<<signatures[d_bucket].oci<<" ";
+			out<<good<<" "<<bad;
+			out<<" "<<printsignature(signatures[d_bucket].sig)<<endl;
+			out.close();
+			reported[d_bucket] = 1;
+		      }
+		    else
+		      {
+			// Try again Mr Noodle 
+			cout<<"AT"<<d_bucket<<" erasing signature 2"<<endl;					    
+			is_attack[d_bucket] = 0;
+			signatures.erase(d_bucket);
+		      }
+		  }
+	      }
+	}
+	if (reported[d_bucket] == 1)
+	  {	
+	    if (match(fit->flow, signatures[d_bucket].sig))
+	      {
+		//cout<<"Filtering flow "<<printsignature(flow)<<" for bucket "<<d_bucket<<endl;
+		// Undo changes for wfilter 
+		it->second.wfilter_p[d_bucket] -= fit->len;	
+		it->second.wfilter_s[d_bucket] -= fit->oci;	
+		it->second.wfilter_s[s_bucket] += fit->oci;
+	      }
+	  }
+	
+	if (!is_attack[d_bucket] && training_done && fit->oci != 0 && sgn(fit->oci) == sgn(it->second.databrick_s[d_bucket]))
+	  {
+	    flow_p f=*fit;
+	    addSample(d_bucket, f, timestamp);
+	  }
+	if ((error = pthread_mutex_unlock (&cells_lock)))
+	  {
+	    fprintf (stderr,
+		     "Error Number %d For Releasing Lock. FATAL ERROR. \n",
+		     error);
+	    exit (-1);
+	  }	
+    }
+  int diff = timestamp - firsttime;
+  if(diff > MIN_TRAIN && !training_done)
+    {
+      training_done = 1;
+      statstime = timestamp;
+    }
+  if (!training_done)
+    {
+            // do learning
       for (int i=0;i<BRICK_DIMENSION;i++)
 	{
 	  for (int j=vol; j<=sym; j++)
 	    {
 	      int data;
 	      if (j == vol)
-		data = cells[timestamp].databrick_p[i];
+		data = it->second.databrick_p[i];
 	      else
-		data = cells[timestamp].databrick_s[i];
-	      /* Only update if everything looks normal */
-	      if (!is_abnormal[i])
+		data = it->second.databrick_s[i];
+	      // Update avg and ss
+	      stats[hist][n][j][i] += 1;
+	      if (stats[hist][n][j][i] == 1)
 		{
-		  // Update avg and ss
-		  stats[cur][n][j][i] += 1;
-		  if (stats[cur][n][j][i] == 1)
-		    {
-		      stats[cur][avg][j][i] =  data;
-		      stats[cur][ss][j][i] =  0;
-		    }
-		  else
-		    {
-		      int ao = stats[cur][avg][j][i];
-		      stats[cur][avg][j][i] = stats[cur][avg][j][i] + (data - stats[cur][avg][j][i])/stats[cur][n][j][i];
-		      stats[cur][ss][j][i] = stats[cur][ss][j][i] + (data-ao)*(data - stats[cur][avg][j][i]);
-		    }		
+		  stats[hist][avg][j][i] =  data;
+		  stats[hist][ss][j][i] =  0;
+		}
+	      else
+		{
+		  int ao = stats[hist][avg][j][i];
+		  stats[hist][avg][j][i] = stats[hist][avg][j][i] + (data - stats[hist][avg][j][i])/stats[hist][n][j][i];
+		  stats[hist][ss][j][i] = stats[hist][ss][j][i] + (data-ao)*(data - stats[hist][avg][j][i]);
 		}
 	    }
 	}
-      updatetime = timestamp;
+      update_dst_arrays(it->first);
     }
-  if (timestamp - statstime >= MIN_TRAIN && training_done)
+  else
     {
-      cout<<"========================> Updating means "<<timestamp<<" statstime "<<statstime<<endl;
-      statstime = timestamp;
-      for (int j = n; j <= ss; j++)
-	for (int k = vol; k <= sym; k++)
-	  {
-	    // Move cur arrays into hist and zero down cur
-	    memcpy (stats[hist][j][k], stats[cur][j][k], BRICK_DIMENSION * sizeof (double));
-	    memset ((double*)stats[cur][j][k], 0, BRICK_DIMENSION * sizeof (double));
-	  }
+      // update stats and detect attack
+      detect_attack(it->first);
+      update_dst_arrays(it->first);
+    }
+  if (samples.find(it->first) != samples.end())
+    {
+      cout<<"Erasing "<<it->first<<endl;
+      samples.erase(it->first);
+    }
+  cells.erase(it);
+}
+
+
+void
+amonProcessingNfdump (char* line, long time)
+{
+  /* 2|1453485557|768|1453485557|768|6|0|0|0|2379511808|44694|0|0|0|2792759296|995|0|0|0|0|2|0|1|40 */
+  // Get start and end time of a flow
+  char* tokene;
+  char saveline[MAXLEN];
+  parse(line,'|', &delimiters);
+  long start = strtol(line+delimiters[0], &tokene, 10);
+  long end = strtol(line+delimiters[2], &tokene, 10);
+  int dur = end - start;
+  // Normalize duration
+  if (dur < 0)
+    dur = 0;
+  if (dur > 3600)
+    dur = 3600;
+  int pkts, bytes;
+
+  /* Get source and destination IP and port and protocol */
+  flow_t flow = {0,0,0,0};
+  /* 2|1453485557|768|1453485557|768|6|0|0|0|2379511808|44694|0|0|0|2792759296|995|0|0|0|0|2|0|1|40 */
+  int proto = atoi(line+delimiters[4]);
+  flow.src = strtol(line+delimiters[8], &tokene, 10);
+  flow.sport = atoi(line+delimiters[9]); // sport
+  flow.dst = strtol(line+delimiters[13], &tokene, 10);
+  flow.dport = atoi(line+delimiters[14]); // dport
+  flow.proto = proto;
+  int flags = atoi(line+delimiters[19]);
+  pkts = atoi(line+delimiters[21]);
+  pkts = (int)(pkts/(dur+1))+1;
+  bytes = atoi(line+delimiters[22]);
+  bytes = (int)(bytes/(dur+1))+1;
+
+  /* Is this outstanding connection? For TCP, connections without 
+     PUSH are outstanding. For UDP, connections that have a request
+     but not a reply are outstanding. Because bidirectional flows
+     may be broken into two unidirectional flows we have values of
+     0, -1 and +1 for outstanding connection indicator or oci. For 
+     TCP we use 0 (there is a PUSH) or 1 (no PUSH) and for UDP/ICMP we 
+     use +1 for requests and -1 for replies. */
+  int oci;
+  if (proto == TCP)
+    {
+      // There is a PUSH flag
+      if ((flags & 8) > 0)
+	oci = 0;
+      else
+	oci = 1;
+    }
+  else if (proto == UDP)
+    {
+      // Quick and dirty check if this is request
+      // or reply
+      // reply, switch src and dst so it can go to the
+      // right databrick
+      if (flow.sport < 1024 && flow.dport >= 1024)
+	oci = -1*pkts;
+      // request
+      else if (flow.sport >= 1024 && flow.dport < 1024)
+	oci = 1*pkts;
+      // unknown, do nothing
+      else
+	oci = 0;
+    }
+  else
+    // unknown, do nothing
+    oci=0;
+  
+  amonProcessing(flow, bytes, start, end, oci);
+}
+
+void
+amonProcessingPcap (struct pfring_pkthdr *h, const u_char * p, long time)
+{
+  struct ether_header ehdr;
+  u_short eth_type;
+  struct ip ip;
+  flow_t flow = {0,0,0,0};
+  u_int32_t displ = 0;
+  u_int32_t src_omega;		            /* The SRC IP in its integer representation */
+  u_int32_t dst_omega;		            /* The DST IP in its integer representation */
+  int len = 0;
+
+  memcpy (&ehdr, p, sizeof (struct ether_header));
+  eth_type = ntohs (ehdr.ether_type);
+
+  if (eth_type == 0x8100)
+    {
+      eth_type = (p[16]) * 256 + p[17];
+      displ += 4;
+      p += 4;
+    }
+
+  if (eth_type == 0x0800)
+    {
+      memcpy (&ip, p + sizeof (ehdr),sizeof (struct ip));        
+      src_omega = ntohl (ip.ip_src.s_addr);
+      dst_omega = ntohl (ip.ip_dst.s_addr);
+      /* Find out ports */
+      
+      pfring_parse_pkt((u_char*)p, (struct pfring_pkthdr*)h, 4, 0, 0);
+      if(h->extended_hdr.parsed_pkt.l4_src_port == 0 && h->extended_hdr.parsed_pkt.l4_dst_port == 0)
+      {
+        memset((void*)&h->extended_hdr.parsed_pkt, 0, sizeof(struct pkt_parsing_info));
+        pfring_parse_pkt((u_char*)p, (struct pfring_pkthdr*)h, 4, 0, 0);
+      }
+
+      flow.src = src_omega;
+      flow.dst = dst_omega;
+      flow.sport = h->extended_hdr.parsed_pkt.l4_src_port;
+      flow.dport = h->extended_hdr.parsed_pkt.l4_dst_port;
+      len = h->len;
+      /* TODO handle OCI here */     
+      amonProcessing(flow, len, time, time, 0);
     }
 }
+
+
+
+
 
 /***********************************************************************/
 void *
@@ -950,8 +1042,8 @@ reset_transmit (void *passed_params)
       long curtime = 0;
       int fresh = 0;
       int error;
-
-      if ((error = pthread_mutex_lock (&cells_lock)))
+      cout<<"********\n";
+      if ((error = pthread_mutex_lock (&flows_lock)))
 	{
 	  fprintf (stderr,
 		   "Error Number %d For Acquiring Lock. FATAL ERROR. \n",
@@ -959,77 +1051,69 @@ reset_transmit (void *passed_params)
 	  exit (-1);
 	}
       // Find timestamps that are not fresh
-      for (map<long,cell>::iterator it=cells.begin(); it != cells.end(); )
+      for (map<long,time_flow>::iterator it=timeflows.begin(); it != timeflows.end(); )
 	{
 	  curtime = it->first;
 	  int diff = curtime - firsttime;
 
-
+	  cout<<"Reset "<<it->first<<" "<<it->second.fresh<<" flow "<<it->second.flows.size()<<endl;
 	  if (it->second.fresh || fresh)
 	    {
-	      if (fresh == 0)
+	      if (fresh == 0 || (fresh <= MIN_FRESH && it->second.flows.size() >= MIN_FLOWS))
 		{
-		  if(diff > MIN_TRAIN && !training_done)
-		    {
-		      training_done = 1;
-		      statstime = curtime;
-		    }
 		  fresh = 1;
-		  cout<<"Reset "<<training_done<<" curtime "<<curtime<<" first "<<firsttime<<" diff "<<diff<<" cells "<<cells.size()<<" fresh "<<it->second.fresh<<" global fresh "<<fresh<<endl;
+		  freshtime = curtime;
+		  cout<<"Reset "<<training_done<<" freshtime "<<freshtime<<" curtime "<<curtime<<" first "<<firsttime<<" diff "<<diff<<" timeflows "<<timeflows.size()<<" fresh "<<it->second.fresh<<" global fresh "<<fresh<<endl;
 
 		}
 	      it->second.fresh = 0;
 	      it++;
 	      continue;
 	    }
-	  if (!training_done)
-	    {
-	      // Collect data for training
-	      for (int i=0;i<BRICK_DIMENSION;i++)
-		{
-		  for (int j=vol; j<=sym; j++)
-		    {
-		      int data;
-		      if (j == vol)
-			data = it->second.databrick_p[i];				 
-		      else
-			data = it->second.databrick_s[i];
-		      // Update avg and ss
-		      stats[hist][n][j][i] += 1;
-		      if (stats[hist][n][j][i] == 1)
-			{
-			  stats[hist][avg][j][i] =  data;
-			  stats[hist][ss][j][i] =  0;
-			}		      
-		      else
-			{
-			  int ao = stats[hist][avg][j][i];
-			  stats[hist][avg][j][i] = stats[hist][avg][j][i] + (data - stats[hist][avg][j][i])/stats[hist][n][j][i];
-			  stats[hist][ss][j][i] = stats[hist][ss][j][i] + (data-ao)*(data - stats[hist][avg][j][i]);
-			}
-		    }
-		}
-	      update_dst_arrays(it->first);
-	    }
 	  else
 	    {
-	      detect_attack(it->first);
-	      update_dst_arrays(it->first);
+	      // Process this batch of flows
+	      processFlows(it->first);
+	      // Do something to collect stats, detect attack, etc
+	      timeflows.erase(it++);
 	    }
-	  if (samples.find(it->first) != samples.end())
-	    {
-	      cout<<"Erasing "<<it->first<<endl;
-	      samples.erase(it->first);
-	    }
-	  cells.erase(it++);
 	}
-      if ((error = pthread_mutex_unlock (&cells_lock)))
+      if ((error = pthread_mutex_unlock (&flows_lock)))
+	{
+	  fprintf (stderr,
+		   "Error Number %d For Releasing Lock. FATAL ERROR. \n",
+		   error);
+	  exit (-1);
+	}
+      /* Check if there is an attack that was waiting a long time to be reported */      
+      if ((error = pthread_mutex_lock (&cells_lock)))
 	{
 	  fprintf (stderr,
 		   "Error Number %d For Acquiring Lock. FATAL ERROR. \n",
 		   error);
 	  exit (-1);
 	}
+      for (map<int,stat_f>::iterator sit = signatures.begin(); sit != signatures.end();)
+	{
+	  long t = sit->second.timestamp;
+	  if (freshtime - t < REPORT_THRESH)
+	    sit++;
+	  if (is_attack[sit->first] && !reported[sit->first])
+	    {
+	      cout<<"AT"<<sit->first<<" not enough matching flows "<<sit->second.nflows<<endl;
+	      is_attack[sit->first] = 0;
+	      signatures.erase(sit++);
+	    }
+	  else
+	    sit++;
+	}
+      if ((error = pthread_mutex_unlock (&cells_lock)))
+	{
+	  fprintf (stderr,
+		   "Error Number %d For Releasing Lock. FATAL ERROR. \n",
+		   error);
+	  exit (-1);
+	}      
       sleep(1);
     }
   pthread_exit (NULL);
