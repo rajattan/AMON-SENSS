@@ -475,6 +475,7 @@ amonProcessing(flow_t flow, int len, long start, long end, int oci)
 	  timeflows.insert(pair<long,time_flow>(i,tf));	  
 	  it = timeflows.find(i);
 	}
+
       flow_p f={start, end, len, oci, flow};
       it->second.flows.push_back(f);
       it->second.fresh++;
@@ -719,6 +720,12 @@ void processFlows(long timestamp)
 {
   int d_bucket = 0, s_bucket = 0;	    /* indices for the databrick */
 
+  cell c;
+  memset(c.databrick_p, 0, BRICK_DIMENSION*sizeof(unsigned int));
+  memset(c.databrick_s, 0, BRICK_DIMENSION*sizeof(int));
+  memset(c.wfilter_p, 0, BRICK_DIMENSION*sizeof(unsigned int));
+  memset(c.wfilter_s, 0, BRICK_DIMENSION*sizeof(int));	  
+
   int error = 0;
   if ((error = pthread_mutex_lock (&cells_lock)))
     {
@@ -727,6 +734,7 @@ void processFlows(long timestamp)
 	       error);
       exit (-1);
     }
+  cout<<"Process flows for "<<timestamp<<endl;
   map<long,cell>::iterator it = cells.find(timestamp);
   for (vector<flow_p>::iterator fit=timeflows[timestamp].flows.begin();  fit != timeflows[timestamp].flows.end(); fit++)
     {
@@ -737,12 +745,6 @@ void processFlows(long timestamp)
 
       if (it == cells.end())
 	{
-	  cell c;
-	  memset(c.databrick_p, 0, BRICK_DIMENSION*sizeof(unsigned int));
-	  memset(c.databrick_s, 0, BRICK_DIMENSION*sizeof(int));
-	  memset(c.wfilter_p, 0, BRICK_DIMENSION*sizeof(unsigned int));
-	  memset(c.wfilter_s, 0, BRICK_DIMENSION*sizeof(int));
-	  
 	  cells.insert(pair<long,cell>(timestamp,c));
 	  it = cells.find(timestamp);
 	}
@@ -752,7 +754,7 @@ void processFlows(long timestamp)
       it->second.wfilter_p[d_bucket] += fit->len;	// add bytes to payload databrick for dst
       it->second.wfilter_s[d_bucket] += fit->oci;	// add oci to symmetry databrick for dst
       it->second.wfilter_s[s_bucket] -= fit->oci;	// subtract oci from symmetry databrick for src
-      
+
       if (is_attack[s_bucket] && reported[s_bucket] == 0)
 	{
 	  flow_t rflow = {fit->flow.dst, fit->flow.dport, fit->flow.src, fit->flow.sport, fit->flow.proto};
@@ -775,7 +777,11 @@ void processFlows(long timestamp)
 	{
 	  if (match(fit->flow, signatures[d_bucket].sig))
 	    {
-	      signatures[d_bucket].nflows++;
+	      if (fit->flow.proto == TCP && fit->oci == 0)
+		signatures[d_bucket].nflows++;
+	      else
+		signatures[d_bucket].nflows+= abs(fit->oci);
+	      cout<<"AT"<<d_bucket<<" flow "<<printsignature(fit->flow)<<" len "<<fit->len<<" oci "<<fit->oci<<" nflows "<<signatures[d_bucket].nflows<<endl;
 	      if (signatures[d_bucket].matchedflows.find(fit->flow) == signatures[d_bucket].matchedflows.end())
 		{
 		  signatures[d_bucket].matchedflows.insert(pair<flow_t, int>(fit->flow,0));
@@ -853,6 +859,7 @@ void processFlows(long timestamp)
 	    flow_p f=*fit;
 	    addSample(d_bucket, f, timestamp);
 	  }
+      
 	if ((error = pthread_mutex_unlock (&cells_lock)))
 	  {
 	    fprintf (stderr,
@@ -867,6 +874,7 @@ void processFlows(long timestamp)
       training_done = 1;
       statstime = timestamp;
     }
+  
   if (!training_done)
     {
             // do learning
@@ -894,7 +902,7 @@ void processFlows(long timestamp)
 		}
 	    }
 	}
-      update_dst_arrays(it->first);
+       update_dst_arrays(it->first);
     }
   else
     {
@@ -1097,7 +1105,10 @@ reset_transmit (void *passed_params)
 	{
 	  long t = sit->second.timestamp;
 	  if (freshtime - t < REPORT_THRESH)
-	    sit++;
+	    {
+	      sit++;
+	      continue;
+	    }
 	  if (is_attack[sit->first] && !reported[sit->first])
 	    {
 	      cout<<"AT"<<sit->first<<" not enough matching flows "<<sit->second.nflows<<endl;
