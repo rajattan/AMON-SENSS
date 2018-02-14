@@ -141,6 +141,7 @@ map<long, time_flow> timeflows;
 map<long,cell> cells;
 map<long,sample> samples;
 map<int,stat_f> signatures;
+vector<long> times;
 long firsttime = 0;    /* Beginning of trace */
 long freshtime = 0;    /* Where we last ended when processing data */
 long firsttimeinfile = 0; /* First time in the current file */
@@ -488,57 +489,6 @@ amonProcessing(flow_t flow, int len, long start, long end, int oci)
       exit (-1);
     }
 }
-
-void update_dst_arrays(long timestamp)
-{
-  if (timestamp <= updatetime)
-      return;
-  if (training_done)
-    {
-      for (int i=0;i<BRICK_DIMENSION;i++)
-	{
-	  for (int j=vol; j<=sym; j++)
-	    {
-	      int data;
-	      if (j == vol)
-		data = cells[timestamp].databrick_p[i];
-	      else
-		data = cells[timestamp].databrick_s[i];
-	      /* Only update if everything looks normal */
-	      if (!is_abnormal[i])
-		{
-		  // Update avg and ss
-		  stats[cur][n][j][i] += 1;
-		  if (stats[cur][n][j][i] == 1)
-		    {
-		      stats[cur][avg][j][i] =  data;
-		      stats[cur][ss][j][i] =  0;
-		    }
-		  else
-		    {
-		      int ao = stats[cur][avg][j][i];
-		      stats[cur][avg][j][i] = stats[cur][avg][j][i] + (data - stats[cur][avg][j][i])/stats[cur][n][j][i];
-		      stats[cur][ss][j][i] = stats[cur][ss][j][i] + (data-ao)*(data - stats[cur][avg][j][i]);
-		    }		
-		}
-	    }
-	}
-      updatetime = timestamp;
-    }
-  if (timestamp - statstime >= MIN_TRAIN && training_done)
-    {
-      cout<<"========================> Updating means "<<timestamp<<" statstime "<<statstime<<endl;
-      statstime = timestamp;
-      for (int j = n; j <= ss; j++)
-	for (int k = vol; k <= sym; k++)
-	  {
-	    // Move cur arrays into hist and zero down cur
-	    memcpy (stats[hist][j][k], stats[cur][j][k], BRICK_DIMENSION * sizeof (double));
-	    memset ((double*)stats[cur][j][k], 0, BRICK_DIMENSION * sizeof (double));
-	  }
-    }
-}
-
 //=======================================================================//
 //===== Function to detect values higher than mean + NUMSTD * stdev ====//
 //=====================================================================//
@@ -558,6 +508,61 @@ int abnormal(int type, int index, unsigned int timestamp)
     return 1;
   else
     return 0;
+}
+
+
+
+void update_dst_arrays(long timestamp)
+{
+  if (timestamp <= updatetime)
+      return;
+  if (training_done)
+    {
+      for (int i=0;i<BRICK_DIMENSION;i++)
+	{
+	  for (int j=vol; j<=sym; j++)
+	    {
+	      int data;
+	      if (j == vol)
+		data = cells[timestamp].databrick_p[i];
+	      else
+		data = cells[timestamp].databrick_s[i];
+	      /* Only update if everything looks normal */
+	      if (!is_abnormal[i])
+		//if (!abnormal(j, i, timestamp))
+		{
+		  // Update avg and ss
+		  stats[cur][n][j][i] += 1;
+		  if (stats[cur][n][j][i] == 1)
+		    {
+		      stats[cur][avg][j][i] =  data;
+		      stats[cur][ss][j][i] =  0;
+		    }
+		  else
+		    {
+		      int ao = stats[cur][avg][j][i];
+		      stats[cur][avg][j][i] = stats[cur][avg][j][i] + (data - stats[cur][avg][j][i])/stats[cur][n][j][i];
+		      stats[cur][ss][j][i] = stats[cur][ss][j][i] + (data-ao)*(data - stats[cur][avg][j][i]);
+		    }		
+		}
+	    }	  
+	  double stds = sqrt(stats[hist][ss][sym][i]/(stats[hist][n][sym][i]-1));
+	  double stdv = sqrt(stats[hist][ss][vol][i]/(stats[hist][n][vol][i]-1));
+	}
+      updatetime = timestamp;
+    }
+  if (timestamp - statstime >= MIN_TRAIN && training_done)
+    {
+      cout<<"========================> Updating means "<<timestamp<<" statstime "<<statstime<<endl;
+      statstime = timestamp;
+      for (int j = n; j <= ss; j++)
+	for (int k = vol; k <= sym; k++)
+	  {
+	    // Move cur arrays into hist and zero down cur
+	    memcpy (stats[hist][j][k], stats[cur][j][k], BRICK_DIMENSION * sizeof (double));
+	    memset ((double*)stats[cur][j][k], 0, BRICK_DIMENSION * sizeof (double));
+	  }
+    }
 }
 
 
@@ -718,6 +723,7 @@ void detect_attack(long timestamp)
 
 void processFlows(long timestamp)
 {
+  times.push_back(timestamp);
   int d_bucket = 0, s_bucket = 0;	    /* indices for the databrick */
 
   cell c;
@@ -741,7 +747,6 @@ void processFlows(long timestamp)
       // One empty cell
       s_bucket = sha_hash(fit->flow.src); // Jelena: should add  & mask
       d_bucket = sha_hash(fit->flow.dst); // Jelena: should add  & mask 
-
 
       if (it == cells.end())
 	{
@@ -877,7 +882,7 @@ void processFlows(long timestamp)
   
   if (!training_done)
     {
-            // do learning
+      // do learning
       for (int i=0;i<BRICK_DIMENSION;i++)
 	{
 	  for (int j=vol; j<=sym; j++)
@@ -903,19 +908,27 @@ void processFlows(long timestamp)
 	    }
 	}
        update_dst_arrays(it->first);
+       cells.erase(it);
     }
   else
     {
       // update stats and detect attack
       detect_attack(it->first);
-      update_dst_arrays(it->first);
+      // do delayed update since it may be that we detect
+      // attack later
+      while (times.size() > int(ATTACK_LOW/interval))
+	{
+	  update_dst_arrays(times[0]);
+	  cells.erase(times[0]);
+	  times.erase(times.begin());
+	}
     }
   if (samples.find(it->first) != samples.end())
     {
       cout<<"Erasing "<<it->first<<endl;
       samples.erase(it->first);
     }
-  cells.erase(it);
+  //cells.erase(it);
 }
 
 
@@ -974,10 +987,11 @@ amonProcessingNfdump (char* line, long time)
       // or reply
       // reply, switch src and dst so it can go to the
       // right databrick
-      if (flow.sport < 1024 && flow.dport >= 1024)
+      // TODO: Add real service ports
+      if ((flow.sport < 1024 || flow.sport == 1900) && flow.dport >= 1024)
 	oci = -1*pkts;
       // request
-      else if (flow.sport >= 1024 && flow.dport < 1024)
+      else if (flow.sport >= 1024 && (flow.dport < 1024 || flow.dport == 1900))
 	oci = 1*pkts;
       // unknown, do nothing
       else
@@ -1081,8 +1095,8 @@ reset_transmit (void *passed_params)
 	  else
 	    {
 	      // Process this batch of flows
-	      processFlows(it->first);
 	      // Do something to collect stats, detect attack, etc
+	      processFlows(it->first);
 	      timeflows.erase(it++);
 	    }
 	}
@@ -1358,7 +1372,7 @@ main (int argc, char *argv[])
 		}
 		closedir (dir);
 	      } else {
-		cerr<<"Could not read directory "<<pcap_in<<endl;
+		perror("Could not read directory ");
 		exit(1);
 	      }	      
 	      std::sort(tracefiles.begin(), tracefiles.end());

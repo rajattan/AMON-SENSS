@@ -31,7 +31,7 @@ using namespace std;
 #define ATTACK_LOW 30    /* Make this a configurable param */
 #define ATTACK_HIGH 60  /* Make this a configurable param */
 #define HIST_LEN 3600    /* How long we remember history */
-#define MIN_TRAIN 3600
+#define MIN_TRAIN 600
 #define MIN_OCI 1000
 #define NUMSTD 5
 #define MAX_SAMPLES 100
