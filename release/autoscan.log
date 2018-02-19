@@ -1,0 +1,85 @@
+autoscan: warning: missing AC_CHECK_FUNCS([memset]) wanted by: 
+	amon.cc:89
+	amon.cc:253
+	amon.cc:254
+	amon.cc:557
+	amon.cc:724
+	amon.cc:725
+	amon.cc:726
+	amon.cc:727
+autoscan: warning: missing AC_CHECK_FUNCS([sqrt]) wanted by: 
+	amon.cc:492
+	amon.cc:543
+	amon.cc:544
+	amon.cc:584
+	amon.cc:586
+autoscan: warning: missing AC_CHECK_FUNCS([strcasecmp]) wanted by: 
+	amon.cc:272
+	amon.cc:276
+	amon.cc:280
+	amon.cc:284
+	amon.cc:284
+	amon.cc:288
+	amon.cc:292
+	amon.cc:296
+	amon.cc:300
+	amon.cc:304
+	amon.cc:308
+	amon.cc:312
+autoscan: warning: missing AC_CHECK_FUNCS([strdup]) wanted by: 
+	amon.cc:1165
+	amon.cc:1174
+	amon.cc:1177
+	amon.cc:1195
+autoscan: warning: missing AC_CHECK_FUNCS([strstr]) wanted by: 
+	amon.cc:1330
+autoscan: warning: missing AC_CHECK_FUNCS([strtol]) wanted by: 
+	amon.cc:937
+	amon.cc:938
+	amon.cc:951
+	amon.cc:953
+	amon.cc:1337
+autoscan: warning: missing AC_CHECK_HEADERS([arpa/inet.h]) wanted by: 
+	amon.cc:50
+	utils.cc:4
+autoscan: warning: missing AC_CHECK_HEADERS([fcntl.h]) wanted by: 
+	amon.cc:36
+autoscan: warning: missing AC_CHECK_HEADERS([locale.h]) wanted by: 
+	amon.cc:53
+autoscan: warning: missing AC_CHECK_HEADERS([netdb.h]) wanted by: 
+	amon.cc:51
+autoscan: warning: missing AC_CHECK_HEADERS([netinet/in.h]) wanted by: 
+	amon.cc:43
+	utils.h:5
+autoscan: warning: missing AC_CHECK_HEADERS([stdint.h]) wanted by: 
+	utils.h:6
+autoscan: warning: missing AC_CHECK_HEADERS([string.h]) wanted by: 
+	amon.cc:37
+	utils.cc:5
+autoscan: warning: missing AC_CHECK_HEADERS([sys/socket.h]) wanted by: 
+	amon.cc:49
+	utils.cc:3
+autoscan: warning: missing AC_CHECK_HEADERS([sys/time.h]) wanted by: 
+	amon.cc:47
+autoscan: warning: missing AC_CHECK_HEADERS([unistd.h]) wanted by: 
+	amon.cc:38
+autoscan: warning: missing AC_CHECK_HEADER_STDBOOL wanted by: 
+	utils.h:54
+	utils.h:80
+	utils.h:77
+	utils.h:58
+	utils.h:62
+	utils.h:66
+	utils.h:70
+	utils.h:74
+autoscan: warning: missing AC_FUNC_MALLOC wanted by: 
+	amon.cc:1130
+autoscan: warning: missing AC_PREREQ wanted by: 
+	autoscan
+autoscan: warning: missing AC_PROG_CC wanted by: 
+	utils.h
+autoscan: warning: missing AC_TYPE_INT32_T wanted by: 
+	amon.cc:1098
+autoscan: warning: missing AC_TYPE_SIZE_T wanted by: 
+	amon.cc:81
+	amon.cc:200
