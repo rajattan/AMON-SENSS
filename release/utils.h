@@ -1,3 +1,22 @@
+/*
+#
+# Copyright (C) 2016 University of Southern California.
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License,
+# version 2, as published by the Free Software Foundation.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+#
+*/
+
 #ifndef __UTILS_H
 #define __UTILS_H
 
@@ -10,23 +29,13 @@
 
 using namespace std;
 
-#define CONFIG_FILE "amon.config" // Configuration file
-#define REPORT_THRESH 30          
+#define BRICK_DIMENSION 257       // How many bins we have. This should NOT be a power of 2
+#define REPORT_THRESH 30
 #define MIN_FLOWS 100000          // This parameter and the next ensure we report on time intervals that
 #define MIN_FRESH 10              // have seen most of their records
 #define HMB 1.1                   // This is how much more a less specific signature should catch to be accepted
-#define FILE_INTERVAL 3600        // Some files may have messed up records. We ignore records with times that are greater than first record's time plus 1h. If your files are bigger than 1h, adjust this interval accordingly.
-#define BRICK_DIMENSION 256       // Number of bins
 #define MAXLINE 255               // Maximum length for reading strings
 #define AR_LEN 30                 // How many delimiters may be in an array
-#define ATTACK_LOW 30             // A bin should be abnormal this many seconds to report attack 
-#define ATTACK_HIGH 60            // A bin should be normal this many seconds to report end of attack
-#define HIST_LEN 3600             // We replace old stats with new after this many seconds
-#define MIN_TRAIN 3600            // We train for this many seconds before we start detecting
-#define NUMSTD 5                  // How many STDEV around the mean are considered normal range
-#define FILTER_THRESH 0.5         // A signature must describe at least this fraction of samples
-#define SIG_FLOWS 100             // If we match this many flows to a signature, that is enough to evaluate it
-#define SPEC_THRESH 0.05          // If symmetric flows matching this signature are this fraction of all flows that matched, this signature is not specific enough
 #define MAX_DIFF 10               // How close should a timestamp be to the one where attack is detected
 
 enum protos {TCP=6, UDP=17};       // Transport protocols we work with. We ignore other traffic
