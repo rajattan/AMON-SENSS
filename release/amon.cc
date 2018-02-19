@@ -137,9 +137,7 @@ map<string,double> parms;
 
 
 
-//====================================================//
-//===== Function to trim strings for config file =====//
-//====================================================//
+// Trim strings 
 char *trim(char *str)
 {
     size_t len = 0;
