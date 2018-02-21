@@ -1005,9 +1005,9 @@ void
 printHelp (void)
 {
   printf ("amon-senss\n(C) 2018 University of Southern California.\n\n");
-  printf ("-h              Print this help\n");
-  printf ("-r <inputfile>  Input is in nfdump or flow-tools file\n");
-  printf ("-v              Verbose\n");
+  printf ("-h                             Print this help\n");
+  printf ("-r <inputfile or inputfolder>  Input is in nfdump or flow-tools file(s)\n");
+  printf ("-v                             Verbose\n");
 }
 
 
@@ -1042,6 +1042,11 @@ int main (int argc, char *argv[])
 	  verbose = 1;
 	  break;
 	}
+    }
+  if (file_in == NULL)
+    {
+      cerr<<"You must specify an input folder, which holds Netflow records\n";
+      exit(-1);
     }
   cout<<"Verbose "<<verbose<<endl;
   // Prepare debug files
