@@ -1,3 +1,22 @@
+/*
+#
+# Copyright (C) 2018 University of Southern California.
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License,
+# version 2, as published by the Free Software Foundation.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+#
+*/
+
 #include "utils.h"
 
 #include <sys/socket.h>
@@ -5,7 +24,9 @@
 #include <string.h>
 #include <sstream>
 #include <iostream>
+#include <fstream>
 
+// We need this so sort would work
 namespace patch
 {
   template < typename T > std::string to_string( const T& n )
@@ -16,6 +37,7 @@ namespace patch
   }
 }
 
+// Convert address to IP string
 string toip(unsigned int addr)
 {
   string out="";
@@ -32,6 +54,7 @@ string toip(unsigned int addr)
   return out;
 }
 
+// Print out signature/flow
 string printsignature(flow_t s)
 {
   string out;
@@ -52,11 +75,11 @@ string printsignature(flow_t s)
 	out += " and ";
       out += ("dst port " + patch::to_string(s.dport));
     }
-  if (s.proto == 6 || s.proto == 17)
+  if (s.proto == TCP || s.proto == UDP)
     {
       if (out.size() > 0)
 	out += " and ";
-      if (s.proto == 6)
+      if (s.proto == TCP)
 	out += "proto tcp";
       else
 	out += "proto udp";
@@ -64,6 +87,7 @@ string printsignature(flow_t s)
   return out;
 }
 
+// Sign of a number
 int sgn(double x)
 {
   if (x<0)
@@ -74,12 +98,13 @@ int sgn(double x)
     return 0;
 }
 
+// Is the signature all zeros (i.e. the default signature)
 int zeros(flow_t a)
 {
   return (a.src == 0) + (a.sport == 0) + (a.dst == 0) + (a.dport == 0) + (a.proto == 0);
 }
 
-/* A signature is better if it has more items defined or if it has ports and srcip */
+// A signature is better if it has more items defined or if it has ports and srcip 
 int bettersig(flow_t a, flow_t b)
 {
   if (zeros(a) < zeros(b) ||
@@ -90,10 +115,26 @@ int bettersig(flow_t a, flow_t b)
     return 0;
 }
 
+// Simple hash function
+// Take the last two bytes, convert into int and mod BRICK_DIMENSION 
 int hash(u_int32_t ip)
 {
-  /* Take the last two bytes, convert into int and mod BRICK_DIMENSION */
   int o = (ip &  0x000ffff) % BRICK_DIMENSION;
   return o;  
 }
-  
+
+map<int,int> services;
+void loadservices(const char* fname)
+{
+  ifstream inFile;
+  inFile.open(fname);
+  int port;
+  while(inFile >> port)
+    services.insert(pair<int, int>(port, 1));  
+}
+
+// Is this a service port?
+int isservice(int port)
+{
+  return(services.find(port) != services.end());
+}

@@ -1,2 +1,0 @@
-START 65 1392357903 0.296805 81170 0 100 src ip 141.214.112.0 and dst ip 192.200.192.0 and dst port 80 and proto tcp
-STOP 65 1392358014
