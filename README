@@ -16,6 +16,11 @@ Run the Perl script asc to configure the parameters via a dialogue.
 To understand how AMON-SENSS works download the document
 http://www.isi.edu/~mirkovic/amon-senss.pdf
 
+AMON-SENSS expects as input one or more files with Netflow records
+(nfdump or flow-tools format). If you specify a folder holding these
+files, possibly in some subfolders, the program will read the folder(s)
+contents, sort by file name and process files in this order.
+
 AMON-SENSS has a Web page, with accompanying tools that can help you respond
 to attacks that are detected
 
