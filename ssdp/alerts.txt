@@ -1,2 +1,0 @@
-START 175 1449676017 0.0119424 14854 0 113 src port 1900 and dst ip 198.111.64.0 and dst port 80 and proto udp
-STOP 175 1449676320
