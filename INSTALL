@@ -1,0 +1,28 @@
+Installation Instructions
+*************************
+
+Copyright (C) 2018 University of Southern California
+
+   Copying and distribution of this file, with or without modification,
+   are permitted in any medium without royalty provided the copyright
+   notice and this notice are preserved.  This file is offered as-is,
+   without warranty of any kind.
+
+Basic Installation
+==================
+
+./configure
+make
+make install
+
+Configuring AMON-SENSS parameters
+=================================
+
+Run asc (a Perl script) to configure the parameters via a dialogue. 
+
+Understanding AMON-SENSS
+========================
+
+To understand how AMON-SENSS works download the document
+http://www.isi.edu/~mirkovic/amon-senss.pdf
+

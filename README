@@ -1,0 +1,41 @@
+This is AMON-SENSS, software for scalable detection of DDoS attacks and
+creation of signatures for attack filtering. Signatures and alerts are
+exported in real time into alerts.txt file. You will soon discover when
+you run this tool that there are many attacks that get detected. This is
+an unfortunate fact -- today's traffic has many DDoS attacks present.
+Many are low volume or low duration and may not require a response. You
+can write another tool that parses alerts.txt and decides which attacks are
+sufficiently large and sufficiently long to require a response. In that case
+you can use the provided signature for the response.
+
+See the INSTALL file for detailed information about how to configure
+and install AMON-SENSS.
+
+Run the Perl script asc to configure the parameters via a dialogue. 
+
+To understand how AMON-SENSS works download the document
+http://www.isi.edu/~mirkovic/amon-senss.pdf
+
+AMON-SENSS has a Web page, with accompanying tools that can help you respond
+to attacks that are detected
+
+   https://steel.isi.edu/projects/SENSS/
+
+=======================================================================
+
+
+ Copyright (C) 2018 University of Southern California.
+
+ This program is free software; you can redistribute it and/or
+ modify it under the terms of the GNU General Public License,
+ version 2, as published by the Free Software Foundation.
+
+ This program is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ GNU General Public License for more details.
+
+ You should have received a copy of the GNU General Public License along
+ with this program; if not, write to the Free Software Foundation, Inc.,
+ 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+
