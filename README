@@ -14,7 +14,7 @@ and install AMON-SENSS.
 Run the Perl script asc to configure the parameters via a dialogue. 
 
 To understand how AMON-SENSS works download the document
-http://www.isi.edu/~mirkovic/amon-senss.pdf
+http://steel.isi.edu/projects/SENSS/amon-senss.pdf
 
 AMON-SENSS expects as input one or more files with Netflow records
 (nfdump or flow-tools format). If you specify a folder holding these
