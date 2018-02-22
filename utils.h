@@ -134,6 +134,17 @@ struct sample
   sample_p bins[BRICK_DIMENSION];
 };
 
+// Function to sort by filename
+struct sortbyFilename
+{
+  inline bool operator()(const string& a, const string& b ) const {
+    int ai = a.find_last_of('/');
+    int bi = b.find_last_of('/');
+    return a.substr(ai+1) < b.substr(bi+1);
+  }
+};
+
+
 // Some function prototypes. Functions are defined in utils.cc
 int hash(u_int32_t ip);
 int sgn(double x);
