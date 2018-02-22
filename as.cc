@@ -1083,7 +1083,10 @@ int main (int argc, char *argv[])
 	      if ((dir = opendir (file_in)) != NULL) {
 		// Remember all the files and directories within directory 
 		while ((ent = readdir (dir)) != NULL) {
-		  tracefiles.push_back(string(file_in) + "/" + string(ent->d_name));
+		  if((strcmp(ent->d_name,".") != 0) && (strcmp(ent->d_name,"..") != 0)){
+		    
+		    tracefiles.push_back(string(file_in) + "/" + string(ent->d_name));
+		  }
 		}
 		closedir (dir);
 	      } else {
