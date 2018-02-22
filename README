@@ -16,15 +16,26 @@ Run the Perl script asc to configure the parameters via a dialogue.
 To understand how AMON-SENSS works download the document
 http://steel.isi.edu/projects/SENSS/amon-senss.pdf
 
+AMON-SENSS has a Web page, with accompanying tools that can help you respond
+to attacks that are detected
+
+   https://steel.isi.edu/projects/SENSS/
+
+=======================================================================
 AMON-SENSS expects as input one or more files with Netflow records
 (nfdump or flow-tools format). If you specify a folder holding these
 files, possibly in some subfolders, the program will read the folder(s)
 contents, sort by file name and process files in this order.
 
-AMON-SENSS has a Web page, with accompanying tools that can help you respond
-to attacks that are detected
+AMON-SENSS produces alerts in alerts.txt file in real time.
+The format of alerts.txt is as follows:
 
-   https://steel.isi.edu/projects/SENSS/
+START bin_number start_time volume asymmetry good_flows_matched bad_flows_matched signature
+STOP bin_number stop_time
+
+If you run it with -v flag, it will also produce some traffic statistics
+for each bin in binnumber.debug files. You can graph these with gnuplot
+or similar to see the traffic trends and the detection signals
 
 =======================================================================
 
