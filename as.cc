@@ -999,6 +999,60 @@ void *reset_transmit (void* passed_parms)
   pthread_exit (NULL);
 }
 
+// Save historical data for later run
+void save_history()
+{  
+  // Only save if training has completed
+  if (training_done)
+    {
+      ofstream out;
+      out.open("as.dump", std::ios_base::out);
+      for (int i=n; i<=ss;i++)
+	for (int j=vol; j<=sym; j++)
+	  {
+	    out<<i<<" "<<j<<" ";
+	    for (int k=0;k<BRICK_DIMENSION;k++)
+	      {
+		out<<stats[hist][i][j][k]<<" ";
+	      }
+	    out<<endl;
+	  }
+      out.close();
+    }
+}
+
+
+// Load historical data
+void load_history()
+{
+  ifstream in;
+  in.open("as.dump", std::ios_base::in);
+  if (in.is_open())
+    {
+      int malformed = 0;
+      for (int i=n; i<=ss;i++)
+	for (int j=vol; j<=sym; j++)
+	  {
+	    int a, b;
+	    in>>a>>b;
+	    if (a != i || b !=j)
+	      {
+		malformed = 1;
+		break;
+	      }
+	    for (int k=0;k<BRICK_DIMENSION;k++)
+	      {
+		in>>stats[hist][i][j][k];
+	      }
+	  }
+      in.close();
+      if (!malformed)
+	{
+	  training_done = 1;
+	  cout<<"Training data loaded"<<endl;
+	}
+    }  
+}
 
 // Print help for the program
 void
@@ -1007,6 +1061,7 @@ printHelp (void)
   printf ("amon-senss\n(C) 2018 University of Southern California.\n\n");
   printf ("-h                             Print this help\n");
   printf ("-r <inputfile or inputfolder>  Input is in nfdump or flow-tools file(s)\n");
+  printf ("-l                             Load historical data from as.dump\n");
   printf ("-v                             Verbose\n");
 }
 
@@ -1024,7 +1079,7 @@ int main (int argc, char *argv[])
   char *file_in = NULL;
 
   
-  while ((c = getopt (argc, argv, "hvr:")) != '?')
+  while ((c = getopt (argc, argv, "hvlr:")) != '?')
     {
       if ((c == 255) || (c == -1))
 	break;
@@ -1037,6 +1092,9 @@ int main (int argc, char *argv[])
 	  break;
 	case 'r':
 	  file_in = strdup (optarg);
+	  break;
+	case 'l':
+	  load_history();
 	  break;
 	case 'v':
 	  verbose = 1;
@@ -1071,45 +1129,50 @@ int main (int argc, char *argv[])
     {
       int isdir = 0;
       vector<string> tracefiles;
+      vector<string> inputs;
       struct stat s;
-      if( stat(file_in,&s) == 0 )
+      inputs.push_back(file_in);
+      int i = 0;
+      // Recursively read if there are several directories that hold the files
+      while(i < inputs.size())
 	{
-	  if(s.st_mode & S_IFDIR )
+	  if( stat(inputs[i].c_str(),&s) == 0 )
 	    {
-	      // it's a directory, read it and fill in 
-	      // list of files
-	      DIR *dir;
-	      struct dirent *ent;
-	      if ((dir = opendir (file_in)) != NULL) {
-		// Remember all the files and directories within directory 
-		while ((ent = readdir (dir)) != NULL) {
-		  if((strcmp(ent->d_name,".") != 0) && (strcmp(ent->d_name,"..") != 0)){
-		    
-		    tracefiles.push_back(string(file_in) + "/" + string(ent->d_name));
+	      if(s.st_mode & S_IFDIR )
+		{
+		  // it's a directory, read it and fill in 
+		  // list of files
+		  DIR *dir;
+		  struct dirent *ent;
+
+		  if ((dir = opendir (inputs[i].c_str())) != NULL) {
+		    // Remember all the files and directories within directory 
+		    while ((ent = readdir (dir)) != NULL) {
+		      if((strcmp(ent->d_name,".") != 0) && (strcmp(ent->d_name,"..") != 0)){
+			inputs.push_back(string(inputs[i]) + "/" + string(ent->d_name));
+		      }
+		    }
+		    closedir (dir);
+		  } else {
+		    perror("Could not read directory ");
+		    exit(1);
 		  }
 		}
-		closedir (dir);
-	      } else {
-		perror("Could not read directory ");
-		exit(1);
-	      }	      
-	      std::sort(tracefiles.begin(), tracefiles.end());
+	      else if(s.st_mode & S_IFREG)
+		{
+		  tracefiles.push_back(inputs[i]);
+		}
+	      // Ignore other file types
 	    }
-	  else if(s.st_mode & S_IFREG)
-	    {
-	      tracefiles.push_back(file_in);
-	    }
-	  else
-	    exit(1);
+	  i++;
 	}
-      else
-	exit(1);
+      
+      std::sort(tracefiles.begin(), tracefiles.end(), sortbyFilename());
 
       // Go through tracefiles and read each one
       for (vector<string>::iterator vit=tracefiles.begin(); vit != tracefiles.end(); vit++)
       {
 	const char* file = vit->c_str();
-
 	
 	char cmd[MAXLINE];
 	// Try to read as netflow file
@@ -1122,7 +1185,6 @@ int main (int argc, char *argv[])
 	  {
 	    sprintf(cmd,"ft2nfdump -r %s | nfdump -r - -o pipe", file);
 	    nf = popen(cmd, "r");
-	    cout<<"Opened with ft2nfdump\n";
 	  }
 	else
 	  {
@@ -1136,8 +1198,7 @@ int main (int argc, char *argv[])
 
 	// Now read from file
 	char line[MAXLINE];
-	if (verbose)
-	  cout<<"Reading from "<<file<<endl;
+	cout<<"Reading from "<<file<<endl;
 	firsttimeinfile = 0;
 	while (fgets(line, MAXLINE, nf) != NULL)
 	  {
@@ -1161,9 +1222,9 @@ int main (int argc, char *argv[])
 	      firsttimeinfile = epoch;
 	    amonProcessingNfdump(line, epoch);
 	  }
-	if (verbose)
-	  cout<<"Done with the file "<<file<<" time "<<time(0)<<endl;
+	cout<<"Done with the file "<<file<<" time "<<time(0)<<endl;
       }
     }
+  save_history();
   return 0;
 }
