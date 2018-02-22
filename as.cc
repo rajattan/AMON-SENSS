@@ -743,7 +743,7 @@ void processFlows(long timestamp)
 			long t = signatures[d_bucket].timestamp;
 			float rate = (float)signatures[d_bucket].vol*8/1024/1024/1024;
 			
-			// Dump alert into a file 
+			// Dump alert into a file
 			ofstream out;
 			out.open("alerts.txt", std::ios_base::app);
 			out<<"START "<<d_bucket<<" "<<t<<" "<<rate;
@@ -1055,6 +1055,7 @@ int main (int argc, char *argv[])
       {
 	sprintf(filename,"%d.debug", i);
 	debug[i].open(filename);
+	debug[i]<<"#timestamp mean_vol std_vol cur_vol mean_as std_as cur_as vol_fil as_fil attack\n";
       }
 
   pthread_t thread_id;
