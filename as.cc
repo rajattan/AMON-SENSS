@@ -1223,6 +1223,7 @@ int main (int argc, char *argv[])
 	    amonProcessingNfdump(line, epoch);
 	  }
 	cout<<"Done with the file "<<file<<" time "<<time(0)<<endl;
+	pclose(nf);
       }
     }
   save_history();
