@@ -660,14 +660,22 @@ void processFlows(long timestamp)
       it->second.databrick_p[d_bucket] += fit->len;
       // add oci to symmetry databrick for dst
       it->second.databrick_s[d_bucket] += fit->oci;
-      // subtract oci from symmetry databrick for src
-      it->second.databrick_s[s_bucket] -= fit->oci;
+
       // add bytes to payload databrick for dst
       it->second.wfilter_p[d_bucket] += fit->len;
       // add oci to symmetry databrick for dst
       it->second.wfilter_s[d_bucket] += fit->oci;
-      // subtract oci from symmetry databrick for src
-      it->second.wfilter_s[s_bucket] -= fit->oci;
+	  
+      if(fit->flow.proto == UDP) 
+      {   // add oci to symmetry databrick for src 
+          it->second.databrick_s[s_bucket] += fit->oci;
+          it->second.wfilter_s[s_bucket] += fit->oci;
+      }    
+      else 
+      {   // subtract oci from symmetry databrick for src 
+          it->second.databrick_s[s_bucket] -= fit->oci;
+          it->second.wfilter_s[s_bucket] -= fit->oci;
+      }
       
       // If we did not report this attack, collect some flows
       // that match a signature for the attack to see if we would
