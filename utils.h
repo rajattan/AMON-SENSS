@@ -29,7 +29,8 @@
 
 using namespace std;
 
-#define BRICK_DIMENSION 257       // How many bins we have. This should NOT be a power of 2
+#define BRICK_HALF 257            // How many bins we have. This should NOT be a power of 2
+#define BRICK_DIMENSION 2*BRICK_HALF // Twice, because we store client and server traffic separately
 #define REPORT_THRESH 30
 #define MIN_FLOWS 100000          // This parameter and the next ensure we report on time intervals that
 #define MIN_FRESH 10              // have seen most of their records
@@ -144,13 +145,14 @@ struct sortbyFilename
   }
 };
 
-
 // Some function prototypes. Functions are defined in utils.cc
-int hash(u_int32_t ip);
+int myhash(u_int32_t src, unsigned short sport, u_int32_t dst, unsigned short dport, int isdst);
 int sgn(double x);
 int bettersig(flow_t a, flow_t b);
 string printsignature(flow_t s);
-void loadservices(const char* fname);
+int loadservices(const char* fname);
+int loadprefixes(const char* fname);
 int isservice(int port);
+int islocal(u_int32_t ip);
 
 #endif

@@ -87,6 +87,10 @@ struct cell
   int wfilter_s[BRICK_DIMENSION];	         // symmetry w filter 
   int fresh;
 };
+// How many service ports are there
+int numservices = 0;
+// How many local prefixes are there
+int numprefs = 0;
 // Save all flows for a given time slot
 map<long, time_flow> timeflows;
 // These are the bins where we store stats
@@ -375,7 +379,7 @@ amonProcessing(flow_t flow, int len, long start, long end, int oci)
   pthread_mutex_unlock (&flows_lock);
 }
 
-// Function to detect values higher than mean + parms[numstd] * stdev 
+/* Function to detect values higher than mean + parms[numstd] * stdev 
 int abnormal(int type, int index, unsigned int timestamp)
 {
   // Look up std and mean
@@ -623,11 +627,12 @@ void detect_attack(long timestamp)
 	    }
 	}
     }
-}
+}*/
 
 // Go through flows for a given timestamp and collect statistics
 void processFlows(long timestamp)
 {
+  cout<<"Process flows "<<timestamp<<endl;
   times.push_back(timestamp);
 
   int d_bucket = 0, s_bucket = 0;	    // indices for the databrick 
@@ -644,44 +649,44 @@ void processFlows(long timestamp)
 
   // Go through each flow
   map<long,cell>::iterator it = cells.find(timestamp);
+
   for (vector<flow_p>::iterator fit=timeflows[timestamp].flows.begin();  fit != timeflows[timestamp].flows.end(); fit++)
     {
-      s_bucket = hash(fit->flow.src); 
-      d_bucket = hash(fit->flow.dst); 
-
+      s_bucket = myhash(fit->flow.src, fit->flow.sport, fit->flow.dst, fit->flow.dport, 0); 
+      d_bucket = myhash(fit->flow.src, fit->flow.sport, fit->flow.dst, fit->flow.dport, 1); 
+      // If this is traffic we ignore, move on
+      if (s_bucket == -1 && d_bucket == -1)
+	continue;
       // Insert a bin if it does not exist
       if (it == cells.end())
 	{
 	  cells.insert(pair<long,cell>(timestamp,c));
 	  it = cells.find(timestamp);
 	}
-      
-      // add bytes to payload databrick for dst
-      it->second.databrick_p[d_bucket] += fit->len;
-      // add oci to symmetry databrick for dst
-      it->second.databrick_s[d_bucket] += fit->oci;
 
-      // add bytes to payload databrick for dst
-      it->second.wfilter_p[d_bucket] += fit->len;
-      // add oci to symmetry databrick for dst
-      it->second.wfilter_s[d_bucket] += fit->oci;
-	  
-      if(fit->flow.proto == UDP) 
-      {   // add oci to symmetry databrick for src 
-          it->second.databrick_s[s_bucket] += fit->oci;
-          it->second.wfilter_s[s_bucket] += fit->oci;
-      }    
-      else 
-      {   // subtract oci from symmetry databrick for src 
-          it->second.databrick_s[s_bucket] -= fit->oci;
-          it->second.wfilter_s[s_bucket] -= fit->oci;
-      }
-      
+      if (d_bucket > -1)
+	{
+	  // add bytes to payload databrick for dst
+	  it->second.databrick_p[d_bucket] += fit->len;
+	  // add oci to symmetry databrick for dst
+	  it->second.databrick_s[d_bucket] += fit->oci;
+
+	  // add bytes to payload databrick for dst
+	  it->second.wfilter_p[d_bucket] += fit->len;
+	  // add oci to symmetry databrick for dst
+	  it->second.wfilter_s[d_bucket] += fit->oci;
+	}
+      if (s_bucket > -1)
+	{
+	  it->second.databrick_s[s_bucket] += fit->oci;
+	  it->second.wfilter_s[s_bucket] += fit->oci;
+	}
+
       // If we did not report this attack, collect some flows
       // that match a signature for the attack to see if we would
       // have too many false positives
       // First deal with reverse flow matching
-      if (is_attack[s_bucket] && reported[s_bucket] == 0)
+      /*      if (is_attack[s_bucket] && reported[s_bucket] == 0)
 	{
 	  flow_t rflow = {fit->flow.dst, fit->flow.dport,
 			  fit->flow.src, fit->flow.sport, fit->flow.proto};
@@ -795,6 +800,7 @@ void processFlows(long timestamp)
 	    flow_p f=*fit;
 	    addSample(d_bucket, f, timestamp);
 	  }
+      */
       // Release the lock 
       pthread_mutex_unlock (&cells_lock);
     }
@@ -838,10 +844,10 @@ void processFlows(long timestamp)
 		}
 	    }
 	}
-      //update_stats(it->first); Jelena check
       // Erase the current statistics
       cells.erase(it);
     }
+      /*
   else
     {
       // update stats and detect attack
@@ -856,11 +862,13 @@ void processFlows(long timestamp)
 	  times.erase(times.begin());
 	}
     }
+      */
   // Erase samples if any
   if (samples.find(it->first) != samples.end())
     {
       samples.erase(it->first);
     }
+
 }
 
 // Read nfdump flow format
@@ -890,6 +898,10 @@ amonProcessingNfdump (char* line, long time)
   flow.dst = strtol(line+delimiters[13], &tokene, 10);
   flow.dport = atoi(line+delimiters[14]); 
   flow.proto = proto;
+  // Cross-traffic, do nothing
+  if (!islocal(flow.dst) && !islocal(flow.src))
+    return;
+
   int flags = atoi(line+delimiters[19]);
   pkts = atoi(line+delimiters[21]);
   pkts = (int)(pkts/(dur+1))+1;
@@ -1081,7 +1093,9 @@ int main (int argc, char *argv[])
   // Parse configuration
   parse_config (parms);
   // Load service port numbers
-  loadservices("services.txt");
+  numservices = loadservices("services.txt");
+  numprefs = loadprefixes("localprefs.txt");
+  cout<<"Num prefs "<<numprefs<<endl;
   
   char c, buf[32];
   char *file_in = NULL;

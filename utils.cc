@@ -37,6 +37,24 @@ namespace patch
   }
 }
 
+// Convert string to address
+unsigned int todec(string ip)
+{
+  int res = 0;
+  int dec = 0;
+  for (int i=0; i<strlen(ip.c_str()); i++)
+    if (isdigit(ip[i]))
+      dec = dec*10+(ip[i]-'0');
+    else
+      {
+	res = res*256+dec;
+	dec = 0;
+      }
+  res = res*256+dec;
+  return res;
+}
+
+
 // Convert address to IP string
 string toip(unsigned int addr)
 {
@@ -116,25 +134,101 @@ int bettersig(flow_t a, flow_t b)
 }
 
 // Simple hash function
-// Take the last two bytes, convert into int and mod BRICK_DIMENSION 
-int hash(u_int32_t ip)
+// Take the second and third bytes, convert into int and mod
+// Use service port instead of the last byte
+int myhash(u_int32_t src, unsigned short sport, u_int32_t dst, unsigned short dport, int isdst)
 {
-  int o = (ip &  0x000ffff) % BRICK_DIMENSION;
+  int o = -1;
+  // client traffic to our prefixes, store in the first half
+  if (islocal(dst))
+    {
+      if(isservice(dport))
+	{
+	  if (isdst)
+	    o = (((dst &  0x00ffff00)+dport) % BRICK_HALF)+BRICK_HALF;
+	  else
+	    o = -1;
+	}
+      // service traffic to our prefixes, store in the second half
+      else if (isservice(sport))
+	{
+	  if (isdst)
+	    o = (((dst &  0x00ffff00)+dport) % BRICK_HALF);
+	  else
+	    o = -1;
+	}
+    }
+  else if (islocal(src))
+    {
+      // client traffic from our prefixes, store in the second half
+      if(isservice(dport))
+	{
+	  if (!isdst)
+	    o = (((src &  0x00ffff00)+dport) % BRICK_HALF);
+	  else
+	    o = -1;
+	}
+      // service traffic from our prefixes, store in the first half
+      else if (isservice(sport))
+	{
+	  if (!isdst)
+	    o = (((src &  0x00ffff00)+sport) % BRICK_HALF)+BRICK_HALF;
+	  else
+	    o = -1;
+	}
+    }
   return o;  
 }
 
 map<int,int> services;
-void loadservices(const char* fname)
+int loadservices(const char* fname)
 {
   ifstream inFile;
+  int i = 0;
   inFile.open(fname);
   int port;
   while(inFile >> port)
-    services.insert(pair<int, int>(port, 1));  
+    services.insert(pair<int, int>(port, i++));
+  return services.size();
 }
 
 // Is this a service port?
 int isservice(int port)
 {
   return(services.find(port) != services.end());
+}
+
+// Load local prefixes
+map <u_int32_t, int> localprefs;
+int loadprefixes(const char* fname)
+{
+  ifstream inFile;
+  int i = 0;
+  inFile.open(fname);
+  char ip[30];
+  char pref[30];
+  char mask[30];
+  while(inFile >> pref)
+    {
+      char* ptr = strstr(pref, "/");
+      if (ptr == NULL)
+	continue;
+      *ptr=0;
+      localprefs.insert(pair<u_int32_t, int>(todec(pref), atoi(ptr+1)));
+      cout<<"Inserted "<<todec(pref)<<" mask "<<atoi(ptr+1)<<endl;
+    }
+  cout<<"Done";
+  return localprefs.size();
+}
+
+// Is this a local prefix?
+int islocal(u_int32_t ip)
+{
+  for (map<u_int32_t, int>::iterator it = localprefs.begin(); it != localprefs.end(); it++)
+    {
+      if ((ip & (~0 << (32 - it->second))) == it->first)
+	return true;
+      else
+	return false;
+    }
 }
