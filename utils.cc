@@ -136,46 +136,17 @@ int bettersig(flow_t a, flow_t b)
 // Simple hash function
 // Take the second and third bytes, convert into int and mod
 // Use service port instead of the last byte
-int myhash(u_int32_t src, unsigned short sport, u_int32_t dst, unsigned short dport, int isdst)
+int myhash(u_int32_t ip, unsigned short port, int first)
 {
-  int o = -1;
-  // client traffic to our prefixes, store in the first half
-  if (islocal(dst))
+  int o;
+  // we host the server, store in the first half
+  if (first)
     {
-      if(isservice(dport))
-	{
-	  if (isdst)
-	    o = (((dst &  0x00ffff00)+dport) % BRICK_HALF)+BRICK_HALF;
-	  else
-	    o = -1;
-	}
-      // service traffic to our prefixes, store in the second half
-      else if (isservice(sport))
-	{
-	  if (isdst)
-	    o = (((dst &  0x00ffff00)+dport) % BRICK_HALF);
-	  else
-	    o = -1;
-	}
+      o = (isservice(port) % BRICK_HALF)+BRICK_HALF;
     }
-  else if (islocal(src))
+  else
     {
-      // client traffic from our prefixes, store in the second half
-      if(isservice(dport))
-	{
-	  if (!isdst)
-	    o = (((src &  0x00ffff00)+dport) % BRICK_HALF);
-	  else
-	    o = -1;
-	}
-      // service traffic from our prefixes, store in the first half
-      else if (isservice(sport))
-	{
-	  if (!isdst)
-	    o = (((src &  0x00ffff00)+sport) % BRICK_HALF)+BRICK_HALF;
-	  else
-	    o = -1;
-	}
+      o = (isservice(port) % BRICK_HALF);
     }
   return o;  
 }
@@ -184,18 +155,23 @@ map<int,int> services;
 int loadservices(const char* fname)
 {
   ifstream inFile;
-  int i = 0;
+  int i = 1;
   inFile.open(fname);
   int port;
   while(inFile >> port)
-    services.insert(pair<int, int>(port, i++));
+    {
+      services.insert(pair<int, int>(port, i++));
+    }
   return services.size();
 }
 
 // Is this a service port?
 int isservice(int port)
 {
-  return(services.find(port) != services.end());
+  if (services.find(port) != services.end())
+    return services[port];
+  else
+    return 0;
 }
 
 // Load local prefixes
@@ -215,9 +191,7 @@ int loadprefixes(const char* fname)
 	continue;
       *ptr=0;
       localprefs.insert(pair<u_int32_t, int>(todec(pref), atoi(ptr+1)));
-      cout<<"Inserted "<<todec(pref)<<" mask "<<atoi(ptr+1)<<endl;
     }
-  cout<<"Done";
   return localprefs.size();
 }
 
@@ -228,7 +202,6 @@ int islocal(u_int32_t ip)
     {
       if ((ip & (~0 << (32 - it->second))) == it->first)
 	return true;
-      else
-	return false;
     }
+  return false;
 }

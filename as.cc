@@ -52,6 +52,15 @@
 
 #include <dirent.h>
 
+// MySQL includes
+#include "mysql_connection.h"
+
+#include <cppconn/driver.h>
+#include <cppconn/exception.h>
+#include <cppconn/resultset.h>
+#include <cppconn/statement.h>
+#include <cppconn/prepared_statement.h>
+
 #include "utils.h"
 
 using namespace std;
@@ -113,6 +122,10 @@ int is_abnormal[BRICK_DIMENSION];
 int is_attack[BRICK_DIMENSION];
 // Did we report an attack in this bin
 int reported[BRICK_DIMENSION];
+// How effective is our filtering
+double effective[BRICK_DIMENSION];
+// How many attacks are we filtering currently
+int isfiltered = 0;
 
 // Did we complete training
 int training_done = 0;
@@ -138,6 +151,19 @@ double stats[2][3][2][BRICK_DIMENSION]; // historical and current stats for atta
 
 // Parameters from as.config
 map<string,double> parms;
+
+// Variables for DB access
+sql::Driver *driver;
+sql::Connection *con;
+sql::PreparedStatement *stmt;
+sql::ResultSet *res;
+
+// Keeping track of procesed flows
+long int processedflows = 0;
+long int processedbytes = 0;
+int nl = 0;
+int l = 0;
+int mal = 0;
 
 // Trim strings 
 char *trim(char *str)
@@ -341,7 +367,10 @@ amonProcessing(flow_t flow, int len, long start, long end, int oci)
 {
   // Detect if the flow is malformed and reject it
   if (malformed(start) || malformed(end))
-    return;
+    {
+      mal++;
+      return;
+    }
 
   // Standardize time
   start = int(int(start / parms["interval"])*parms["interval"]);
@@ -357,7 +386,9 @@ amonProcessing(flow_t flow, int len, long start, long end, int oci)
     {
       // Too late for this flow
       if (i < freshtime)
-	continue;
+	{
+	  continue;
+	}
       
       // New timestamp, insert into structure
       map<long,time_flow>::iterator it = timeflows.find(i);
@@ -379,7 +410,7 @@ amonProcessing(flow_t flow, int len, long start, long end, int oci)
   pthread_mutex_unlock (&flows_lock);
 }
 
-/* Function to detect values higher than mean + parms[numstd] * stdev 
+// Function to detect values higher than mean + parms[numstd] * stdev 
 int abnormal(int type, int index, unsigned int timestamp)
 {
   // Look up std and mean
@@ -412,7 +443,7 @@ void update_stats(long timestamp)
   if (timestamp <= updatetime)   
       return;
 
-  // If training is done, update current estimates
+  // We come here only if training is done
   if (training_done)
     {
       for (int i=0;i<BRICK_DIMENSION;i++)
@@ -441,13 +472,13 @@ void update_stats(long timestamp)
 			(data - stats[cur][avg][j][i])/stats[cur][n][j][i];
 		      stats[cur][ss][j][i] = stats[cur][ss][j][i] +
 			(data-ao)*(data - stats[cur][avg][j][i]);
-		    }		
+		    }
 		}
-	    }	  
+	    }
 	}
       updatetime = timestamp;
     }
-  // Else training is done and it is time for current values to become
+  // If training is done and it is time for current values to become
   // historical
   if (timestamp - statstime >= parms["min_train"] && training_done)
     {
@@ -473,6 +504,43 @@ void detect_attack(long timestamp)
   // This timeslot is too late for detection
   if (timestamp <= updatetime)
     return;
+
+  // If verbose, output debugging statistics into DB
+  if (0) //verbose)
+    {
+      stmt = con->prepareStatement ("INSERT INTO stats VALUES (?, ?, ?)");
+
+      DataBuf buffer1((char*)cells[timestamp].databrick_p, 4*sizeof(int)*BRICK_DIMENSION+sizeof(int));
+      DataBuf buffer2((char*)cells[timestamp].databrick_s, 4*sizeof(int)*BRICK_DIMENSION+sizeof(int));
+
+      istream stream1(&buffer1);
+      istream stream2(&buffer2);
+      
+      stmt->setUInt(1, timestamp);
+      stmt->setBlob(2, &stream1);
+      stmt->setBlob(3, &stream2);
+      stmt->executeUpdate(); 
+
+      delete stmt;
+    }
+  if (0) //verbose && isfiltered)
+    {
+      stmt = con->prepareStatement ("INSERT INTO filtered VALUES (?, ?, ?)");
+
+      DataBuf buffer1((char*)cells[timestamp].wfilter_p, 4*sizeof(int)*BRICK_DIMENSION+sizeof(int));
+      DataBuf buffer2((char*)cells[timestamp].wfilter_s, 4*sizeof(int)*BRICK_DIMENSION+sizeof(int));
+
+      istream stream1(&buffer1);
+      istream stream2(&buffer2);
+      
+      stmt->setUInt(1, timestamp);
+      stmt->setBlob(2, &stream1);
+      stmt->setBlob(3, &stream2);
+      stmt->executeUpdate(); 
+
+      delete stmt;
+    }
+
   // For each bin
   for (int i=0;i<BRICK_DIMENSION;i++)
     {
@@ -482,17 +550,65 @@ void detect_attack(long timestamp)
       double avgs = stats[hist][avg][sym][i];
       double stds = sqrt(stats[hist][ss][sym][i]/(stats[hist][n][sym][i]-1));
 
-      // If verbose, output debugging statistics into files
-      if (verbose)
+      // Attack is going on, it was reported and the bin is still abnormal
+      if (is_attack[i] > 0 && is_abnormal[i] > 0 && reported[i] > 1)
 	{
-	  debug[i]<<timestamp<<" "<<avgv<<" ";
-	  debug[i]<<stdv<<" "<<cells[timestamp].databrick_p[i]<<" ";
-	  debug[i]<<avgs<<" "<<stds<<" ";
-	  debug[i]<<cells[timestamp].databrick_s[i]<<" ";
-	  debug[i]<<cells[timestamp].wfilter_p[i]<<"  ";
-	  debug[i]<<cells[timestamp].wfilter_s[i]<<"  ";
-	  debug[i]<<is_attack[i]<<endl;
+	  // How effective is filtering?
+	  if (cells[timestamp].databrick_s[i] != 0)
+	    {
+	      // If they are different sign, just assume everything is filtered
+	      double r = (double)cells[timestamp].wfilter_s[i]/cells[timestamp].databrick_s[i];
+	      if (r < 0)
+		{
+		  effective[i] = effective[i]*ALPHA + (1-ALPHA);
+		  cout<<"diff sign "<<r<<" filtering is "<<effective[i]<<" effective for bin "<<i<<" w filter "<<cells[timestamp].wfilter_s[i]<<" total "<<cells[timestamp].databrick_s[i]<<endl;
+		}
+	      else
+		{
+		  effective[i] = effective[i]*ALPHA+r*(1-ALPHA);
+		  cout<<"same sign "<<r<<" filtering is "<<effective[i]<<" effective for bin "<<i<<" w filter "<<cells[timestamp].wfilter_s[i]<<" total "<<cells[timestamp].databrick_s[i]<<endl;
+		}
+	    }
+	  if (verbose)
+	    cout<<"Filtering is "<<effective[i]<<" effective for bin "<<i<<" w filter "<<cells[timestamp].wfilter_s[i]<<" total "<<cells[timestamp].databrick_s[i]<<endl;
+	  if (effective[i] < EFF_THRESH)
+	    {
+	      // Signal end of attack. There is anomaly but the signature we have is not
+	      // effective anymore
+	      if (verbose)
+		cout <<"AT: Attack has stopped in destination bin "<< i
+		     << " time " << timestamp <<" sig "
+		     <<printsignature(signatures[i].sig)<<endl;
+	      // Write the end of the attack into alerts
+	      ofstream out;
+	      out.open("alerts.txt", std::ios_base::app);
+	      out << "STOP "<<i<<" "<<timestamp<<endl;
+	      out.close();
+
+	      // Write it into DB
+	      stmt = con->prepareStatement ("UPDATE attacks SET stop=? WHERE bin=? and stop IS NULL");
+	  
+	      stmt->setUInt(1, timestamp);
+	      stmt->setInt(2, i);
+	      stmt->executeUpdate();
+	      cout<<"Updated DB set stop="<<timestamp<<" for attack on bin "<<i<<endl;
+			
+	      delete stmt;
+	      
+	      // Delete signature if exists
+	      if (signatures.find(i) != signatures.end())
+		signatures.erase(i);
+	      // Reset attack and reported signals
+	      is_attack[i] = 0;
+	      if (reported[i])
+		isfiltered--;
+	      reported[i] = 0;
+	      effective[i] = 0;
+	    }	  
 	}
+      // How many intervals have elapsed since the attack was reported
+      if (reported[i])
+	reported[i]++;
 
       // If both volume and asymmetry are abnormal and training has completed
       if (training_done && abnormal(vol, i, timestamp)
@@ -511,7 +627,10 @@ void detect_attack(long timestamp)
 	    {
 	      // Signal attack detection 
 	      is_attack[i] = 1;
+	      if (reported[i])
+		isfiltered--;
 	      reported[i] = 0;
+	      effective[i] = 0;
 	      if (verbose)
 		cout<<"AT: Attack detected on "<<i<<" but not reported yet, timestamp "<<timestamp<<endl;
 
@@ -617,22 +736,36 @@ void detect_attack(long timestamp)
 		  out.open("alerts.txt", std::ios_base::app);
 		  out << "STOP "<<i<<" "<<timestamp<<endl;
 		  out.close();
+
+		  // Write it into DB
+		  stmt = con->prepareStatement ("UPDATE attacks SET stop=? WHERE bin=? and stop IS NULL");
+	  
+		  stmt->setUInt(1, timestamp);
+		  stmt->setInt(2, i);
+		  stmt->executeUpdate();
+		  cout<<"Updated DB set stop="<<timestamp<<" for attack on bin "<<i<<endl;
+			
+		  delete stmt;
 		}
 	      // Delete signature if exists
 	      if (signatures.find(i) != signatures.end())
 		signatures.erase(i);
 	      // Reset attack and reported signals
 	      is_attack[i] = 0;
+	      isfiltered--;
 	      reported[i] = 0;
+	      effective[i] = 0;
 	    }
 	}
     }
-}*/
+}
 
 // Go through flows for a given timestamp and collect statistics
-void processFlows(long timestamp)
+void processFlows(long timestamp, long starttime)
 {
-  cout<<"Process flows "<<timestamp<<endl;
+  long difft = time(0) - starttime + 1;
+  long diffs = timestamp - firsttime;
+  cout<<"Processed "<<diffs<<" in real time "<<difft<<" processing flows, "<<processedflows/difft<<" and GBs "<<int(processedbytes/10000000/difft)/100.0<<"timeflows "<<timeflows.size()<<" cells "<<cells.size()<<" samples "<<samples.size()<<" signatures "<<signatures.size()<<" times "<<times.size()<<endl;
   times.push_back(timestamp);
 
   int d_bucket = 0, s_bucket = 0;	    // indices for the databrick 
@@ -652,11 +785,37 @@ void processFlows(long timestamp)
 
   for (vector<flow_p>::iterator fit=timeflows[timestamp].flows.begin();  fit != timeflows[timestamp].flows.end(); fit++)
     {
-      s_bucket = myhash(fit->flow.src, fit->flow.sport, fit->flow.dst, fit->flow.dport, 0); 
-      d_bucket = myhash(fit->flow.src, fit->flow.sport, fit->flow.dst, fit->flow.dport, 1); 
-      // If this is traffic we ignore, move on
-      if (s_bucket == -1 && d_bucket == -1)
-	continue;
+      if (islocal(fit->flow.dst))
+	{
+	  if (isservice(fit->flow.dport))
+	    {
+	      d_bucket = myhash(fit->flow.dst, fit->flow.dport, 1);
+	    }
+	  else if (isservice(fit->flow.sport))
+	    {
+	      d_bucket = myhash(fit->flow.dst, fit->flow.sport, 0);
+	    }
+	  else
+	    {
+	      d_bucket = myhash(fit->flow.dst, 0, 0);
+	    }
+	}
+      if (islocal(fit->flow.src))
+	{
+	  if (isservice(fit->flow.sport))
+	    {
+	      s_bucket = myhash(fit->flow.src, fit->flow.sport, 1);
+	    }
+	  else if (isservice(fit->flow.dport))
+	    {
+	      s_bucket = myhash(fit->flow.src, fit->flow.dport, 0);
+	    }
+	  else
+	    {
+	      s_bucket = myhash(fit->flow.src, 0, 0);
+	    }
+	}
+
       // Insert a bin if it does not exist
       if (it == cells.end())
 	{
@@ -664,29 +823,18 @@ void processFlows(long timestamp)
 	  it = cells.find(timestamp);
 	}
 
-      if (d_bucket > -1)
-	{
-	  // add bytes to payload databrick for dst
-	  it->second.databrick_p[d_bucket] += fit->len;
-	  // add oci to symmetry databrick for dst
-	  it->second.databrick_s[d_bucket] += fit->oci;
-
-	  // add bytes to payload databrick for dst
-	  it->second.wfilter_p[d_bucket] += fit->len;
-	  // add oci to symmetry databrick for dst
-	  it->second.wfilter_s[d_bucket] += fit->oci;
-	}
-      if (s_bucket > -1)
-	{
-	  it->second.databrick_s[s_bucket] += fit->oci;
-	  it->second.wfilter_s[s_bucket] += fit->oci;
-	}
+      // add bytes to payload databrick for dst
+      it->second.databrick_p[d_bucket] += fit->len;
+      // add oci to symmetry databrick for dst
+      it->second.databrick_s[d_bucket] += fit->oci;
+      
+      it->second.databrick_s[s_bucket] += fit->oci;
 
       // If we did not report this attack, collect some flows
       // that match a signature for the attack to see if we would
       // have too many false positives
       // First deal with reverse flow matching
-      /*      if (is_attack[s_bucket] && reported[s_bucket] == 0)
+      if (is_attack[s_bucket] && reported[s_bucket] == 0)
 	{
 	  flow_t rflow = {fit->flow.dst, fit->flow.dport,
 			  fit->flow.src, fit->flow.sport, fit->flow.proto};
@@ -724,8 +872,7 @@ void processFlows(long timestamp)
 		signatures[d_bucket].matchedflows[fit->flow] ++;
 	      else
 		signatures[d_bucket].matchedflows[fit->flow] += abs(fit->oci);
-	      
-	      
+
 	      // Decide if this is really an attack worth reporting, i.e., 
 	      // its signature will filter out asymmetric flows but not too 
 	      // many symmetric ones 
@@ -764,8 +911,21 @@ void processFlows(long timestamp)
 			out<<good<<" "<<bad;
 			out<<" "<<printsignature(signatures[d_bucket].sig)<<endl;
 			out.close();
+
+			// Insert it into DB
+			stmt = con->prepareStatement ("INSERT INTO attacks VALUES (?, NULL, ?, ?)");
+	  
+			stmt->setUInt(1, t);
+			stmt->setInt(2, d_bucket);
+			stmt->setString(3, printsignature(signatures[d_bucket].sig));
+			stmt->executeUpdate(); 
+			
+			delete stmt;
+
 			// Flip the reported bit
+			cout<<"AT: attack on "<<d_bucket<<" reported at "<<t<<" signature is "<<printsignature(signatures[d_bucket].sig)<<endl;
 			reported[d_bucket] = 1;
+			isfiltered++;
 		      }
 		    else
 		      {
@@ -780,14 +940,13 @@ void processFlows(long timestamp)
 	}
       // If this is a reported attack and we're verbose, let's collect
       // some statistics on how much we're helping
-      if (reported[d_bucket] == 1 && verbose)
-	{	
+      if (reported[d_bucket] > 0)
+	{
 	  if (match(fit->flow, signatures[d_bucket].sig))
 	    {
-	      // Undo changes for wfilter 
-	      it->second.wfilter_p[d_bucket] -= fit->len;	
-	      it->second.wfilter_s[d_bucket] -= fit->oci;	
-	      it->second.wfilter_s[s_bucket] += fit->oci;
+	      // How much volume and asymm. are we filtering
+	      it->second.wfilter_p[d_bucket] += fit->len;	
+	      it->second.wfilter_s[d_bucket] += fit->oci;	
 	    }
 	}
 
@@ -800,7 +959,6 @@ void processFlows(long timestamp)
 	    flow_p f=*fit;
 	    addSample(d_bucket, f, timestamp);
 	  }
-      */
       // Release the lock 
       pthread_mutex_unlock (&cells_lock);
     }
@@ -817,6 +975,25 @@ void processFlows(long timestamp)
   // If we did not, let's do the learning
   if (!training_done)
     {
+      // If verbose, output debugging statistics into DB
+      if (0) //verbose)
+	{
+	  stmt = con->prepareStatement ("INSERT INTO stats VALUES (?, ?, ?)");
+	  
+	  DataBuf buffer1((char*)it->second.databrick_p, 4*sizeof(int)*BRICK_DIMENSION+sizeof(int));
+	  DataBuf buffer2((char*)it->second.databrick_s, 4*sizeof(int)*BRICK_DIMENSION+sizeof(int));
+
+	  istream stream1(&buffer1);
+	  istream stream2(&buffer2);
+	  
+	  stmt->setUInt(1, timestamp);
+	  stmt->setBlob(2, &stream1);
+	  stmt->setBlob(3, &stream2);
+	  stmt->executeUpdate(); 
+	  
+	  delete stmt;
+	}
+
       for (int i=0;i<BRICK_DIMENSION;i++)
 	{
 	  for (int j=vol; j<=sym; j++)
@@ -847,7 +1024,6 @@ void processFlows(long timestamp)
       // Erase the current statistics
       cells.erase(it);
     }
-      /*
   else
     {
       // update stats and detect attack
@@ -862,13 +1038,11 @@ void processFlows(long timestamp)
 	  times.erase(times.begin());
 	}
     }
-      */
   // Erase samples if any
   if (samples.find(it->first) != samples.end())
     {
       samples.erase(it->first);
     }
-
 }
 
 // Read nfdump flow format
@@ -898,14 +1072,19 @@ amonProcessingNfdump (char* line, long time)
   flow.dst = strtol(line+delimiters[13], &tokene, 10);
   flow.dport = atoi(line+delimiters[14]); 
   flow.proto = proto;
+  bytes = atoi(line+delimiters[22]);
+  processedflows++;
+  processedbytes+=bytes;
   // Cross-traffic, do nothing
   if (!islocal(flow.dst) && !islocal(flow.src))
-    return;
-
+    {
+      nl++;
+      return;
+    }
+  l++;
   int flags = atoi(line+delimiters[19]);
   pkts = atoi(line+delimiters[21]);
   pkts = (int)(pkts/(dur+1))+1;
-  bytes = atoi(line+delimiters[22]);
   bytes = (int)(bytes/(dur+1))+1;
 
   /* Is this outstanding connection? For TCP, connections without 
@@ -948,6 +1127,7 @@ amonProcessingNfdump (char* line, long time)
 // Ever so often go through flows and process what is ready
 void *reset_transmit (void* passed_parms)
 {
+  unsigned long starttime = time(0);
   while (1)
     {
       long curtime = 0;
@@ -980,13 +1160,13 @@ void *reset_transmit (void* passed_parms)
 	    {
 	      // Process this batch of flows
 	      // Collect stats, detect attack, etc
-	      processFlows(it->first);
+	      processFlows(it->first, starttime);
 	      timeflows.erase(it++);
 	    }
 	}
       // Release access to flows
       pthread_mutex_unlock (&flows_lock);
-
+   
       // Check if there is an attack that was waiting
       // a long time to be reported. Perhaps we had too specific
       // signature and we will never collect enough matches
@@ -1004,7 +1184,7 @@ void *reset_transmit (void* passed_parms)
 	  if (is_attack[sit->first] && !reported[sit->first])
 	    {
 	      if (verbose)
-		cout<<"AT: attack on "<<sit->first<<" not enough matching flows "<<sit->second.nflows<<endl;
+		cout<<"AT: attack on "<<sit->first<<" not enough matching flows "<<sit->second.nflows<<" now is "<<freshtime<<" attack detected at "<<t<<" waited "<<parms["report_thresh"]<<endl;
 	      is_attack[sit->first] = 0;
 	      signatures.erase(sit++);
 	    }
@@ -1082,6 +1262,8 @@ printHelp (void)
   printf ("-h                             Print this help\n");
   printf ("-r <inputfile or inputfolder>  Input is in nfdump or flow-tools file(s)\n");
   printf ("-l                             Load historical data from as.dump\n");
+  printf ("-s                             Start from this given file in the input folder\n");
+  printf ("-e                             End with this given file in the input folder\n");
   printf ("-v                             Verbose\n");
 }
 
@@ -1094,14 +1276,16 @@ int main (int argc, char *argv[])
   parse_config (parms);
   // Load service port numbers
   numservices = loadservices("services.txt");
+  cout<<"Services "<<numservices<<endl;
   numprefs = loadprefixes("localprefs.txt");
   cout<<"Num prefs "<<numprefs<<endl;
   
   char c, buf[32];
   char *file_in = NULL;
-
+  char *startfile = NULL, *endfile = NULL;
   
-  while ((c = getopt (argc, argv, "hvlr:")) != '?')
+  
+  while ((c = getopt (argc, argv, "hvlr:s:e:")) != '?')
     {
       if ((c == 255) || (c == -1))
 	break;
@@ -1113,10 +1297,18 @@ int main (int argc, char *argv[])
 	  return (0);
 	  break;
 	case 'r':
-	  file_in = strdup (optarg);
+	  file_in = strdup(optarg);
 	  break;
 	case 'l':
 	  load_history();
+	  break;
+	case 's':
+	  startfile = strdup(optarg);
+	  cout<<"Start file "<<startfile<<endl;
+	  break;
+	case 'e':
+	  endfile = strdup(optarg);
+	  cout<<"End file "<<endfile<<endl;
 	  break;
 	case 'v':
 	  verbose = 1;
@@ -1129,14 +1321,15 @@ int main (int argc, char *argv[])
       exit(-1);
     }
   cout<<"Verbose "<<verbose<<endl;
-  // Prepare debug files
-  if (verbose)
-    for (int i = 0; i < BRICK_DIMENSION; i++)
-      {
-	sprintf(filename,"%d.debug", i);
-	debug[i].open(filename);
-	debug[i]<<"#timestamp mean_vol std_vol cur_vol mean_as std_as cur_as vol_fil as_fil attack\n";
-      }
+  // Connect to DB
+  try {
+    driver = get_driver_instance();
+    con = driver->connect("tcp://127.0.0.1:3306", "amon-senss", "St33llab@isi");
+    con->setSchema("AMONSENSS");
+   }
+  catch (sql::SQLException &e) {
+    cerr<<"Could not connect to the DB\n";
+  }
 
   pthread_t thread_id;
   pthread_create (&thread_id, NULL, reset_transmit, NULL);
@@ -1191,10 +1384,21 @@ int main (int argc, char *argv[])
       
       std::sort(tracefiles.begin(), tracefiles.end(), sortbyFilename());
 
+      int started = 1;
+      if (startfile != NULL)
+	started = 0;
       // Go through tracefiles and read each one
       for (vector<string>::iterator vit=tracefiles.begin(); vit != tracefiles.end(); vit++)
       {
 	const char* file = vit->c_str();
+
+	if (!started && startfile && strstr(file,startfile) == NULL)
+	  {
+	    cout<<"No match "<<startfile<<" "<<file<<endl;
+	    continue;
+	  }
+
+	started = 1;
 	
 	char cmd[MAXLINE];
 	// Try to read as netflow file
@@ -1245,7 +1449,9 @@ int main (int argc, char *argv[])
 	    amonProcessingNfdump(line, epoch);
 	  }
 	cout<<"Done with the file "<<file<<" time "<<time(0)<<endl;
-	pclose(nf);      
+	pclose(nf);
+	if (endfile && strstr(file,endfile) != 0)
+	  break;
       }
     }
   save_history();

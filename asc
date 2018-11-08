@@ -88,6 +88,18 @@ else
     print $fh "numstd=" . trim($input) . "\n";
 }
 
+
+print "How long do you want to measure (in seconds) once you have a possible signature, to estimate collateral damage? (default = 1s) ";
+$input = <STDIN>;
+if (trim($input) eq "")
+{
+    print $fh "report_thresh=1\n";
+}
+else
+{
+    print $fh "report_thresh=" . trim($input) . "\n";
+}
+
 print "If a signature were too broad, what level of collateral damage are you willing to tolerate? For example\n";
 print "out of every 100 flows dropped by the signature, how many would you tolerate to be legitimate flows? (default = 5) ";
 $input = <STDIN>;

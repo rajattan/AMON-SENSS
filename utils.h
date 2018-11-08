@@ -25,11 +25,12 @@
 #include <stdint.h>
 #include <vector>
 #include <string>
+#include <streambuf>
 #include <map>
 
 using namespace std;
 
-#define BRICK_HALF 257            // How many bins we have. This should NOT be a power of 2
+#define BRICK_HALF 7001            // How many bins we have. This should NOT be a power of 2
 #define BRICK_DIMENSION 2*BRICK_HALF // Twice, because we store client and server traffic separately
 #define REPORT_THRESH 30
 #define MIN_FLOWS 100000          // This parameter and the next ensure we report on time intervals that
@@ -44,7 +45,18 @@ using namespace std;
 #define MIN_SAMPLES 0.1           // We must have samples for at least this fraction of training period to
                                   // roll over current stats into historical stats
 
+#define ALPHA 0.5                 // Constant for weighted average of filtering effectiveness
+#define EFF_THRESH 0.5            // If we're dropping less than this much traffic, we need a better signature
 enum protos {TCP=6, UDP=17};      // Transport protocols we work with. We ignore other traffic
+
+
+class DataBuf : public streambuf
+{
+ public:
+  DataBuf(char * d, size_t s) {
+    setg(d, d, d + s);
+  }
+};
 
 // 5-tuple for the flow
 struct flow_t{
@@ -146,7 +158,7 @@ struct sortbyFilename
 };
 
 // Some function prototypes. Functions are defined in utils.cc
-int myhash(u_int32_t src, unsigned short sport, u_int32_t dst, unsigned short dport, int isdst);
+int myhash(u_int32_t ip, unsigned short port, int first);
 int sgn(double x);
 int bettersig(flow_t a, flow_t b);
 string printsignature(flow_t s);
