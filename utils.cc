@@ -136,19 +136,24 @@ int bettersig(flow_t a, flow_t b)
 // Simple hash function
 // Take the second and third bytes, convert into int and mod
 // Use service port instead of the last byte
-int myhash(u_int32_t ip, unsigned short port, int first)
+int myhash(u_int32_t ip, unsigned short port, int way)
 {
-  int o;
-  // we host the server, store in the first half
-  if (first)
+  // 1 - sip, 2 - dip, 3 - dpref /24, 4 - serv, 5 - cli
+  switch (way)
     {
-      o = (isservice(port) % BRICK_HALF)+BRICK_HALF;
+      case FOR:
+	return ip % BRICK_UNIT;
+      case LOC:
+	return (ip % BRICK_UNIT) + BRICK_UNIT;
+      case LOCPREF:
+	return ((ip & 0xffffff00) % BRICK_UNIT) + 2*BRICK_UNIT;
+      case SERV:
+	return (isservice(port) % BRICK_UNIT) + 3*BRICK_UNIT;
+      case CLI:
+	return (isservice(port) % BRICK_UNIT) + 4*BRICK_UNIT;
+      default:
+	return 0;
     }
-  else
-    {
-      o = (isservice(port) % BRICK_HALF);
-    }
-  return o;  
 }
 
 map<int,int> services;
