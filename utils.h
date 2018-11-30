@@ -43,6 +43,7 @@ enum ways{FOR, LOC, LOCPREF, SERV, CLI};
 #define AR_LEN 30                 // How many delimiters may be in an array
 #define MAX_DIFF 10               // How close should a timestamp be to the one where attack is detected
 #define NF 8                      // Number of different signatures for a flow
+#define MAX_SAMPLES 20            // How many timestamps can I accumulate before processing
 
 #define FILTER_THRESH 0.5         // A signature must explain this much of asymmetry
 #define SIG_FLOWS 100             // This many flows must be collected, at least, to evaluate a signature
@@ -143,13 +144,13 @@ struct stat_r
 struct sample_p
 {
   flow_p flows[NF];
-  //map<flow_t,stat_r> signatures;
 };
 
 // Holds the samples for each bin
 struct sample
 {
   sample_p bins[BRICK_DIMENSION];
+  long timestamp;
 };
 
 // Function to sort by filename
