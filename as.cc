@@ -63,6 +63,8 @@
 
 #include "utils.h"
 
+#define BILLION 1000000000L
+
 using namespace std;
 
 // We store delimiters in this array
@@ -140,6 +142,7 @@ long firsttimeinfile = 0; // First time in the current file
 long updatetime = 0;      // Time of last stats update
 long statstime = 0;       // Time when we move the stats to history 
 char filename[MAXLINE];   // A string to hold filenames
+struct timespec last_entry;
 
 // Serialize access to statistics
 pthread_mutex_t cells_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -364,20 +367,15 @@ void addSample(int index, flow_p f, long i, int way)
 	key.dport = f.flow.dport;
       // Overload len so we can track frequency of contributions
       // Jelena - there was continue here
-      //samples[current].bins[index].flows[s].flow = key;
-      continue; // continue here works even with the above line
       // Insert sample if it does not exist
       if (samples[current].bins[index].flows[s].flow == key)
 	{
-	  samples[current].bins[index].flows[s].len += 1;
-	  continue; // Jelena added these two lines
 	  // Else increase contributions of this signature wrt symmetry
 	  samples[current].bins[index].flows[s].len += abs(f.oci);
 	  samples[current].bins[index].flows[s].oci += f.oci;
 	}
       else
 	{
-	  continue; // Jelena
 	  // Boyer Moore to find signatures that cover the most flows
 	  if (empty(samples[current].bins[index].flows[s].flow))
 	    samples[current].bins[index].flows[s].flow = key;
@@ -423,27 +421,9 @@ int malformed(long timestamp)
   return 0;
 }
 
-// Main function, which processes each flow
-void
-amonProcessing(flow_t flow, int len, long start, long end, int oci)
+
+void rememberFlow(flow_t flow, int len, long start, long end, int oci)
 {
-  // Detect if the flow is malformed and reject it
-  if (malformed(start) || malformed(end))
-    {
-      mal++;
-      return;
-    }
-
-  // Standardize time
-  start = int(int(start / parms["interval"])*parms["interval"]);
-  end = int(int(end / parms["interval"])*parms["interval"]);
-
-  // Obtain a lock to serialize access to flows
-  pthread_mutex_lock (&flows_lock);
-  
-  // Just link the flow into the structure and process
-  // when it is ready. For flows that last a long time
-  // multiply the flow and insert into each time interval  
   for (long i = start; i <= end; i+= parms["interval"])
     {
       // Too late for this flow
@@ -468,6 +448,29 @@ amonProcessing(flow_t flow, int len, long start, long end, int oci)
       it->second->flows.push_back(f);
       it->second->fresh++; 
     }
+}
+
+// Main function, which processes each flow
+void
+amonProcessing(flow_t flow, int len, long start, long end, int oci)
+{
+  // Detect if the flow is malformed and reject it
+  if (malformed(start) || malformed(end))
+    {
+      mal++;
+      return;
+    }
+  // Standardize time
+  start = int(int(start / parms["interval"])*parms["interval"]);
+  end = int(int(end / parms["interval"])*parms["interval"]);
+
+  // Obtain a lock to serialize access to flows
+  pthread_mutex_lock (&flows_lock);
+  
+  // Just link the flow into the structure and process
+  // when it is ready. For flows that last a long time
+  // multiply the flow and insert into each time interval
+  rememberFlow(flow, len, start, end, oci); 
 
   // Release the lock
   pthread_mutex_unlock (&flows_lock);
@@ -825,14 +828,143 @@ void detect_attack(long timestamp)
     }
 }
 
+void checkReport(int bucket)
+{
+  if (signatures[bucket].nflows >= SIG_FLOWS)
+    {
+      int good = 0, bad = 0;
+      
+      for(map <flow_t, int>::iterator mit = signatures[bucket].matchedflows.begin(); mit != signatures[bucket].matchedflows.end(); mit++)
+	{
+	  // Symmetry makes a flow good only if it is UDP or TCP+PSH
+	  if ((signatures[bucket].reverseflows.find(mit->first) != signatures[bucket].reverseflows.end() &&
+	       mit->first.proto == UDP)
+	      || (mit->first.proto == TCP && mit->second == 0))
+	    {
+	      good += signatures[bucket].reverseflows[mit->first];
+	      int d = mit->second - signatures[bucket].reverseflows[mit->first];
+	      if (d < 0)
+		d = 0;
+	      bad += d;
+	    }
+	  else
+	    bad += mit->second;
+	}
+      if (verbose)
+	cout<<"SIG: "<<bucket<<" good "<<good<<" bad "<<bad<<" sig "<<printsignature(signatures[bucket].sig)<<endl;
+      if ((float)good/(good+bad) <= parms["spec_thresh"])
+	{
+	  long t = signatures[bucket].timestamp;
+	  float rate = (float)signatures[bucket].vol*8/1024/1024/1024;
+	  
+	  // Dump alert into a file
+	  ofstream out;
+	  out.open("alerts.txt", std::ios_base::app);
+	  out<<bucket/BRICK_UNIT<<" ";
+	  out<<"START "<<bucket<<" "<<t<<" "<<rate;
+	  out<<" "<<signatures[bucket].oci<<" ";
+	  out<<good<<" "<<bad;
+	  out<<" "<<printsignature(signatures[bucket].sig)<<endl;
+	  out.close();
+			  
+	  // Insert it DB here
+	  /* stmt = con->prepareStatement ("INSERT INTO attacks VALUES (?, NULL, ?, ?)");
+	     
+			      stmt->setUInt(1, t);
+			      stmt->setInt(2, bucket);
+			      stmt->setString(3, printsignature(signatures[bucket].sig));
+			      stmt->executeUpdate(); 
+			      
+			      delete stmt;
+	  */
+	  // Flip the reported bit
+	  cout<<"AT: attack on "<<bucket<<" reported at "<<t<<" signature is "<<printsignature(signatures[bucket].sig)<<endl;
+	  reported[bucket] = 1;
+	  isfiltered++;
+	}
+      else
+	{
+	  // Try again Mr Noodle, this was not a good signature
+	  if (verbose)
+	    cout<<"SIG: attack on "<<bucket<<" signature was not specific enough "<<endl;
+	  is_attack[bucket] = 0;
+	  signatures.erase(bucket);
+	}      
+    }
+}
+  
+void matchFlows(int bucket, vector<flow_p>::iterator fit)
+{
+  if (is_attack[bucket] && reported[bucket] == 0)
+    {
+      flow_t rflow = {fit->flow.dst, fit->flow.dport,
+		      fit->flow.src, fit->flow.sport, fit->flow.proto};
+      
+      if (match(rflow, signatures[bucket].sig))
+	{
+	  if (signatures[bucket].reverseflows.find(rflow) ==
+	      signatures[bucket].reverseflows.end())
+	    {
+	      signatures[bucket].reverseflows.insert(pair<flow_t, int>(rflow,0));
+	    }
+	  if (fit->oci == 0)
+	    signatures[bucket].reverseflows[rflow] ++;
+	  else
+	    signatures[bucket].reverseflows[rflow] += abs(fit->oci);
+	}
+      // Now deal with exact flow matching
+      if (match(fit->flow, signatures[bucket].sig))
+	{
+	  if (fit->flow.proto == TCP && fit->oci == 0)
+	    signatures[bucket].nflows++;
+	  else
+	    signatures[bucket].nflows+= abs(fit->oci);
+	  
+	  
+	  if (signatures[bucket].matchedflows.find(fit->flow)
+	      == signatures[bucket].matchedflows.end())
+	    {
+	      signatures[bucket].matchedflows.insert(pair<flow_t, int>(fit->flow,0));
+	    }
+	  if (fit->oci == 0)
+	    signatures[bucket].matchedflows[fit->flow] ++;
+	  else
+	    signatures[bucket].matchedflows[fit->flow] += abs(fit->oci);
+	  // Decide if this is really an attack worth reporting, i.e., 
+	  // its signature will filter out asymmetric flows but not too 
+	  // many symmetric ones
+	  checkReport(bucket);
+	}
+    }      
+}
+
+void collectStats(int bucket, vector<flow_p>::iterator fit, map<long,cell*>::iterator it)
+{
+  if (reported[bucket] > 0)
+    {
+      if (match(fit->flow, signatures[bucket].sig))
+	{
+	  // How much volume and asymm. are we filtering
+	  it->second->wfilter_p[bucket] += fit->len;	
+	  it->second->wfilter_s[bucket] += fit->oci;	
+	}
+    }
+}
+
 // Go through flows for a given timestamp and collect statistics
 void processFlows(long timestamp, long starttime)
 {
   long difft = time(0) - starttime + 1;
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);  
+  double telapsed = (double)((now.tv_sec-last_entry.tv_sec)*BILLION+now.tv_nsec-last_entry.tv_nsec)/BILLION;
+  clock_gettime(CLOCK_MONOTONIC, &last_entry);  
+
   long diffs = timestamp - firsttime;
-  cout<<"Processed "<<diffs<<" in real time "<<difft<<" processing flows, "<<processedflows/difft<<" and GBs "<<int(processedbytes/10000000/difft)/100.0<<" timeflows "<<timeflows.size()<<" cells "<<cells.size()<<" signatures "<<signatures.size()<<" times "<<times.size()<<" inserts "<<inserts<<" cinserts "<<cinserts<<endl;
+  cout<<"Processed "<<diffs<<" in real time "<<difft<<" processing flows, "<<processedflows/telapsed<<" and GBs "<<int(processedbytes/10000000/difft)/100.0<<" elapsed time "<<telapsed<<" timeflows "<<timeflows.size()<<" cells "<<cells.size()<<" signatures "<<signatures.size()<<" times "<<times.size()<<" inserts "<<inserts<<" cinserts "<<cinserts<<endl;
   inserts = 0;
   cinserts = 0;
+  processedflows = 0;
 
   if (training_done) 
     times.push_back(timestamp);
@@ -862,6 +994,7 @@ void processFlows(long timestamp, long starttime)
 	}      
       for (int way = FOR; way < CLI; way++) // SERV is included in CLI
 	{
+	  // Find buckets on which to work
 	  if (way == FOR)
 	    {
 	      if (fit->flow.dlocal)
@@ -948,120 +1081,11 @@ void processFlows(long timestamp, long starttime)
 		      break;
 		    }
 		}
-	      if (is_attack[bucket] && reported[bucket] == 0)
-		{
-		  flow_t rflow = {fit->flow.dst, fit->flow.dport,
-				  fit->flow.src, fit->flow.sport, fit->flow.proto};
-		  
-		  if (match(rflow, signatures[bucket].sig))
-		    {
-		      if (signatures[bucket].reverseflows.find(rflow) ==
-			  signatures[bucket].reverseflows.end())
-			{
-			  signatures[bucket].reverseflows.insert(pair<flow_t, int>(rflow,0));
-			}
-		      if (fit->oci == 0)
-			signatures[bucket].reverseflows[rflow] ++;
-		      else
-			signatures[bucket].reverseflows[rflow] += abs(fit->oci);
-		    }
-		  // Now deal with exact flow matching
-		  if (match(fit->flow, signatures[bucket].sig))
-		    {
-		      if (fit->flow.proto == TCP && fit->oci == 0)
-			signatures[bucket].nflows++;
-		      else
-			signatures[bucket].nflows+= abs(fit->oci);
-		      
-
-		      if (signatures[bucket].matchedflows.find(fit->flow)
-			  == signatures[bucket].matchedflows.end())
-			{
-			  signatures[bucket].matchedflows.insert(pair<flow_t, int>(fit->flow,0));
-			}
-		      if (fit->oci == 0)
-			signatures[bucket].matchedflows[fit->flow] ++;
-		      else
-			signatures[bucket].matchedflows[fit->flow] += abs(fit->oci);
-		      // Decide if this is really an attack worth reporting, i.e., 
-		      // its signature will filter out asymmetric flows but not too 
-		      // many symmetric ones 
-		      if (signatures[bucket].nflows >= SIG_FLOWS)
-			{
-			  int good = 0, bad = 0;
-			  
-			  for(map <flow_t, int>::iterator mit = signatures[bucket].matchedflows.begin(); mit != signatures[bucket].matchedflows.end(); mit++)
-			    {
-			      // Symmetry makes a flow good only if it is UDP or TCP+PSH
-			      if ((signatures[bucket].reverseflows.find(mit->first) != signatures[bucket].reverseflows.end() &&
-				   mit->first.proto == UDP)
-				  || (mit->first.proto == TCP && mit->second == 0))
-				{
-				  good += signatures[bucket].reverseflows[mit->first];
-				  int d = mit->second - signatures[bucket].reverseflows[mit->first];
-				  if (d < 0)
-				    d = 0;
-				  bad += d;
-				}
-			      else
-				bad += mit->second;
-			    }
-			  if (verbose)
-			    cout<<"SIG: "<<bucket<<" good "<<good<<" bad "<<bad<<" sig "<<printsignature(signatures[bucket].sig)<<endl;
-			  if ((float)good/(good+bad) <= parms["spec_thresh"])
-			    {
-			      long t = signatures[bucket].timestamp;
-			      float rate = (float)signatures[bucket].vol*8/1024/1024/1024;
-			      
-			      // Dump alert into a file
-			      ofstream out;
-			      out.open("alerts.txt", std::ios_base::app);
-			      out<<bucket/BRICK_UNIT<<" ";
-			      out<<"START "<<bucket<<" "<<t<<" "<<rate;
-			      out<<" "<<signatures[bucket].oci<<" ";
-			      out<<good<<" "<<bad;
-			      out<<" "<<printsignature(signatures[bucket].sig)<<endl;
-			      out.close();
-			  
-			      // Insert it into DB
-			      stmt = con->prepareStatement ("INSERT INTO attacks VALUES (?, NULL, ?, ?)");
-			  
-			      stmt->setUInt(1, t);
-			      stmt->setInt(2, bucket);
-			      stmt->setString(3, printsignature(signatures[bucket].sig));
-			      stmt->executeUpdate(); 
-			      
-			      delete stmt;
-
-			      // Flip the reported bit
-			      cout<<"AT: attack on "<<bucket<<" reported at "<<t<<" signature is "<<printsignature(signatures[bucket].sig)<<endl;
-			      reported[bucket] = 1;
-			      isfiltered++;
-			    }
-			  else
-			    {
-			      // Try again Mr Noodle, this was not a good signature
-			      if (verbose)
-				cout<<"SIG: attack on "<<bucket<<" signature was not specific enough "<<endl;
-			      is_attack[bucket] = 0;
-			      signatures.erase(bucket);
-			    }
-			}
-		    }
-		}
-	    
+	      matchFlows(bucket, fit);	    
 	    
 	      // If this is a reported attack and we're verbose, let's collect
 	      // some statistics on how much we're helping
-	      if (reported[bucket] > 0)
-		{
-		  if (match(fit->flow, signatures[bucket].sig))
-		    {
-		      // How much volume and asymm. are we filtering
-		      it->second->wfilter_p[bucket] += fit->len;	
-		      it->second->wfilter_s[bucket] += fit->oci;	
-		    }
-		}
+	      collectStats(bucket, fit, it);
 	  
 	      // If we've not yet signaled an attack but the flow's oci is of the
 	      // same sign as the stats for its bin, collect this flow in samples
@@ -1097,25 +1121,6 @@ void processFlows(long timestamp, long starttime)
   if (!training_done)
     {
       // If verbose, output debugging statistics into DB
-      if (0) //verbose)
-	{
-	  stmt = con->prepareStatement ("INSERT INTO stats VALUES (?, ?, ?)");
-	  
-	  DataBuf buffer1((char*)it->second->databrick_p, 4*sizeof(int)*BRICK_DIMENSION+sizeof(int));
-	  DataBuf buffer2((char*)it->second->databrick_s, 4*sizeof(int)*BRICK_DIMENSION+sizeof(int));
-
-	  istream stream1(&buffer1);
-	  istream stream2(&buffer2);
-	  
-	  stmt->setUInt(1, timestamp);
-	  stmt->setBlob(2, &stream1);
-	  stmt->setBlob(3, &stream2);
-	  stmt->executeUpdate(); 
-	  
-	  delete stmt;
-	}
-
-
       for (int i=0;i<BRICK_DIMENSION;i++)
 	{
 	  for (int j=vol; j<=sym; j++)
@@ -1244,7 +1249,7 @@ amonProcessingNfdump (char* line, long time)
     // unknown proto, do nothing
     oci=0;
   
-  amonProcessing(flow, bytes, start, end, oci);
+  amonProcessing(flow, bytes, start, end, oci); 
 }
 
 
@@ -1321,7 +1326,7 @@ void *reset_transmit (void* passed_parms)
       // Release the lock to access stats
       pthread_mutex_unlock (&cells_lock);
       // Sleep a bit and try again
-      sleep(1);
+      sleep(1); 
     }
   pthread_exit (NULL);
 }
@@ -1459,8 +1464,11 @@ int main (int argc, char *argv[])
   }
 
   pthread_t thread_id;
-  pthread_create (&thread_id, NULL, reset_transmit, NULL);
+  pthread_create (&thread_id, NULL, reset_transmit, NULL); 
 
+
+
+  clock_gettime(CLOCK_MONOTONIC, &last_entry);      
   // This is going to be a pointer to input
   // stream, either from nfdump or flow-tools */
   FILE* nf;
@@ -1514,6 +1522,8 @@ int main (int argc, char *argv[])
       int started = 1;
       if (startfile != NULL)
 	started = 0;
+      int allflows = 0;
+      double start = time(0);
       // Go through tracefiles and read each one
       for (vector<string>::iterator vit=tracefiles.begin(); vit != tracefiles.end(); vit++)
       {
@@ -1553,6 +1563,7 @@ int main (int argc, char *argv[])
 	char line[MAXLINE];
 	cout<<"Reading from "<<file<<endl;
 	firsttimeinfile = 0;
+
 	while (fgets(line, MAXLINE, nf) != NULL)
 	  {
 	    // Check that this is the line with a flow
@@ -1573,7 +1584,14 @@ int main (int argc, char *argv[])
 	    num_pkts++;
 	    if (firsttimeinfile == 0)
 	      firsttimeinfile = epoch;
-	    amonProcessingNfdump(line, epoch);
+	    allflows++;
+	    if (allflows % 1000000 == 0)
+	      {
+		double diff = time(0) - start;
+		cout<<"Processed "<<allflows<<", 1M in "<<diff<<endl;
+		start = time(0);
+	      }
+	    amonProcessingNfdump(line, epoch); 
 	  }
 	cout<<"Done with the file "<<file<<" time "<<time(0)<<endl;
 	pclose(nf);
