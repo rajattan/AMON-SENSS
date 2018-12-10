@@ -52,7 +52,7 @@
 
 #include <dirent.h>
 
-// MySQL includes
+/* MySQL includes
 #include "mysql_connection.h"
 
 #include <cppconn/driver.h>
@@ -60,6 +60,7 @@
 #include <cppconn/resultset.h>
 #include <cppconn/statement.h>
 #include <cppconn/prepared_statement.h>
+*/
 
 #include "utils.h"
 
@@ -104,12 +105,16 @@ int numservices = 0;
 int numprefs = 0;
 // Save all flows for a given time slot
 map<long, time_flow*> timeflows;
+
 // These are the bins where we store stats
-map<long,cell*> cells;
-// Samples of flows for each time slot
-sample samples[MAX_SAMPLES];
-int sfront = 0;
-int srear = 0;
+cell cells[QSIZE];
+int cfront = 0;
+int crear = 0;
+bool cempty = true;
+
+// Samples of flows for signatures
+sample samples;
+
 // Signatures we devised for each bin
 map<int,stat_f> signatures;
 // We remember all time slots here and
@@ -132,7 +137,12 @@ double effective[BRICK_DIMENSION];
 int isfiltered = 0;
 
 // Did we complete training
-int training_done = 0;
+bool training_done = false;
+int trained = 0;
+
+// Current time
+long curtime = 0;
+
 // Verbose bit
 int verbose = 0;
 
@@ -157,11 +167,12 @@ double stats[2][3][2][BRICK_DIMENSION]; // historical and current stats for atta
 // Parameters from as.config
 map<string,double> parms;
 
-// Variables for DB access
+/* Variables for DB access
 sql::Driver *driver;
 sql::Connection *con;
 sql::PreparedStatement *stmt;
 sql::ResultSet *res;
+*/
 
 // Keeping track of procesed flows
 long int processedflows = 0;
@@ -290,105 +301,60 @@ int empty(flow_t sig)
 
 
 // Add a flow to the samples bin
-void addSample(int index, flow_p f, long i, int way)
+void addSample(int index, flow_p* f, flow_t* key)
 {
-  bool found = false;
-  int current = -1;
-  for (int s = sfront; s != srear; s = (s+1) % MAX_SAMPLES)
-    {
-      if (samples[s].timestamp == i)
-	{
-	  found = true;
-	  current = s;
-	  break;
-	}
-    }
-  // Insert the bin if it does not exist
-  if (!found)
-    {
-      samples[srear].timestamp = i;
-      current = srear;
-      srear = (srear+1) % MAX_SAMPLES;
-      // Jelena: Check if array is full 
-    }
   // Create some partial signatures for this flow, like src-dst combination,
   // src-sport, etc
   for (int s=0; s<8; s++)
     {
-      // Default signature matches everything
-      // Only allow signatures with defined proto and key items for
-      // the chosen "way" of hashing
-      flow_t key = {0,0,0,0,0};     
-      key.proto = f.flow.proto;
-      unsigned int other = 0;
-      int othertype = 0;
-      if (way == FOR)
-	{
-	  if (!f.flow.dlocal)
-	    {
-	      key.dst = f.flow.dst;
-	      other = f.flow.src;
-	    }
-	  else
-	    {
-	      key.src = f.flow.src;
-	      other = f.flow.dst;
-	      othertype = 1;
-	    }
-	}
-      else if (way == LOC || way == LOCPREF)
-	{
-	  int mask = 0xffffffff;
-	  if (way == LOCPREF)
-	    mask = mask & 0xffffff00;
-	if (f.flow.dlocal)
-	  {
-	    key.dst = f.flow.dst & mask;
-	    other = f.flow.src;
-	  }
-	else
-	  {
-	    key.src = f.flow.src & mask;
-	    other = f.flow.dst;
-	    othertype = 1;
-	  }
-	}
-      // src, dst, sport, dport
+      flow_t k = *key;
+      k.proto = f->flow.proto;
       if ((s & 4) > 0)
 	{
-	  if (othertype == 0)
-	    key.src = other;
+	  // Jelena perhaps should deal with protocols
+	  if (k.src == 0 && k.dst == f->flow.dst)
+	    k.src = f->flow.src;
+	  else if (k.src == f->flow.src && k.dst == 0)
+	    k.dst = f->flow.dst;
+	  // Both are zero, assume dst
 	  else
-	    key.dst = other;
+	    k.dst = f->flow.dst;
 	}
       if ((s & 2) > 0)
-	key.sport = f.flow.sport;
+	if (k.sport == 0)
+	  k.sport = f->flow.sport;
+	else
+	  k.src = f->flow.src;
       if ((s & 1) > 0)
-	key.dport = f.flow.dport;
+	if (k.dport == 0)
+	  k.dport = f->flow.dport;
+	else
+	  k.src = f->flow.src;
+      // src, dst, sport, dport
       // Overload len so we can track frequency of contributions
       // Jelena - there was continue here
       // Insert sample if it does not exist
-      if (samples[current].bins[index].flows[s].flow == key)
+      if (samples.bins[index].flows[s].flow == k)
 	{
 	  // Else increase contributions of this signature wrt symmetry
-	  samples[current].bins[index].flows[s].len += abs(f.oci);
-	  samples[current].bins[index].flows[s].oci += f.oci;
+	  samples.bins[index].flows[s].len += abs(f->oci);
+	  samples.bins[index].flows[s].oci += f->oci;
 	}
       else
 	{
 	  // Boyer Moore to find signatures that cover the most flows
-	  if (empty(samples[current].bins[index].flows[s].flow))
-	    samples[current].bins[index].flows[s].flow = key;
+	  if (empty(samples.bins[index].flows[s].flow))
+	    samples.bins[index].flows[s].flow = k;
 	  else
 	    {
-	      samples[current].bins[index].flows[s].len -= abs(f.oci);
+	      samples.bins[index].flows[s].len -= abs(f->oci);
 	      // Replace this signature if there's another one,
 	      // which covers more
-	      if (samples[current].bins[index].flows[s].len < 0)
+	      if (samples.bins[index].flows[s].len < 0)
 		{
-		  samples[current].bins[index].flows[s].flow = key;
-		  samples[current].bins[index].flows[s].len = abs(f.oci);
-		  samples[current].bins[index].flows[s].oci = f.oci;
+		  samples.bins[index].flows[s].flow = k;
+		  samples.bins[index].flows[s].len = abs(f->oci);
+		  samples.bins[index].flows[s].oci = f->oci;
 		}
 	    }
 	}
@@ -450,6 +416,34 @@ void rememberFlow(flow_t flow, int len, long start, long end, int oci)
     }
 }
 
+void
+addSamples(int s_bucket, int d_bucket, flow_p* fp, cell* c, flow_t* key)
+{
+  // If we've not yet signaled an attack but the flow's oci is of the
+  // same sign as the stats for its bin, collect this flow in samples
+  // for possible signature later
+  int bucket = s_bucket;
+  for (int i=0; i<2; i++)
+    {
+      if (bucket == -1)
+	{
+	  if (bucket == s_bucket)
+	    {
+	      bucket = d_bucket;
+	      continue;
+	    }
+	  else
+	    return;
+	}
+
+      if (!is_attack[bucket] && training_done && fp->oci != 0                                                                    	  && sgn(fp->oci) == sgn(c->databrick_s[bucket]))                                                                         	{
+	addSample(bucket, fp, key);
+      }
+      if (bucket == s_bucket)
+	bucket = d_bucket;
+    }
+}
+
 // Main function, which processes each flow
 void
 amonProcessing(flow_t flow, int len, long start, long end, int oci)
@@ -461,23 +455,98 @@ amonProcessing(flow_t flow, int len, long start, long end, int oci)
       return;
     }
   // Standardize time
+  curtime = start;
   start = int(int(start / parms["interval"])*parms["interval"]);
   end = int(int(end / parms["interval"])*parms["interval"]);
 
-  // Obtain a lock to serialize access to flows
-  pthread_mutex_lock (&flows_lock);
-  
-  // Just link the flow into the structure and process
-  // when it is ready. For flows that last a long time
-  // multiply the flow and insert into each time interval
-  rememberFlow(flow, len, start, end, oci); 
+  flow_p fp={start, end, len, oci, flow};
+      
+  int d_bucket = -1, s_bucket = -1;	    // indices for the databrick 
 
-  // Release the lock
-  pthread_mutex_unlock (&flows_lock);
+  cell *c = &cells[crear];
+  
+  for (int way = FOR; way < CLI; way++) // SERV is included in CLI
+    {
+      flow_t key = {0, 0, 0, 0, 0};
+      // Find buckets on which to work
+      if (way == FOR)
+	{
+	  if (flow.dlocal)
+	    {
+	      s_bucket = myhash(flow.src, 0, FOR);
+	      c->databrick_p[s_bucket] += len;
+	      c->databrick_s[s_bucket] += oci;
+	      key.src = flow.src;
+	    }
+	  if (flow.slocal)
+	    {
+	      d_bucket = myhash(flow.dst, 0, FOR);
+	      c->databrick_s[d_bucket] += oci;
+	      key.dst = flow.dst;
+	    }
+	}
+      else if (way == LOC || way == LOCPREF)
+	{
+	  if (flow.dlocal)
+	    {
+	      d_bucket = myhash(flow.dst, 0, way);
+	      c->databrick_p[d_bucket] += len;
+	      c->databrick_s[d_bucket] += oci;
+	      key.dst = flow.dst;
+	    }
+	  if (flow.slocal)
+	    {
+	      s_bucket = myhash(flow.src, 0, way);
+	      c->databrick_s[s_bucket] += oci;
+	      key.src = flow.src;
+	    }	      
+	}
+      else if (way == SERV) // CLI is included in SERV
+	{
+	  if (flow.dlocal)
+	    {
+	      if (isservice(flow.dport))
+		{
+		  d_bucket = myhash(0, flow.dport, SERV);
+		  key.dport = flow.dport;
+		}
+	      else if (isservice(flow.sport))
+		{
+		  d_bucket = myhash(0, flow.sport, CLI);
+		  key.sport = flow.sport;
+		}
+	      else
+		{
+		  d_bucket = myhash(0, 0, CLI);
+		}
+	    }
+	  if (flow.slocal)
+	    {
+	      if (isservice(flow.sport))
+		{
+		  s_bucket = myhash(0, flow.sport, SERV);
+		  key.sport = flow.sport;
+		}
+	      else if (isservice(flow.dport))
+		{
+		  s_bucket = myhash(0, flow.dport, CLI);
+		  key.dport = flow.dport;
+		}
+	      else
+		{
+		  s_bucket = myhash(0, 0, CLI);
+		}
+	    }
+	  c->databrick_p[d_bucket] += len;
+	  c->databrick_s[d_bucket] += oci;
+	  c->databrick_s[s_bucket] += oci;	 
+	}
+      addSamples(s_bucket, d_bucket, &fp, c, &key);
+    }
 }
 
 // Function to detect values higher than mean + parms[numstd] * stdev 
-int abnormal(int type, int index, unsigned int timestamp)
+int abnormal(int type, int index, cell* c)
 {
   // Look up std and mean
   double mean = stats[hist][avg][type][index];
@@ -486,127 +555,165 @@ int abnormal(int type, int index, unsigned int timestamp)
   // Look up current value
   int data;
   if (type == vol)
-    data = cells[timestamp]->databrick_p[index];
+    data = c->databrick_p[index];
   else
-    data = cells[timestamp]->databrick_s[index];
-
+    data = c->databrick_s[index];
   // Volume larger than mean + numstd*stdev is abnormal 
   if (type == vol && data > mean + parms["numstd"]*std)
-    return 1;
+    {
+      return 1;
+    }
   // Symmetry larger than mean + numstd*stdev or
   // smaller than mean - numstd*stdev is abnormal 
   else if (type == sym && ((data > mean + parms["numstd"]*std) ||
 			   (data < mean - parms["numstd"]*std)))
-    return 1;
+    {
+      return 1;
+    }
   else
-    return 0;
+    {
+      return 0;
+    }
 }
 
 // Update statistics
-void update_stats(long timestamp)
+void update_stats(cell* c)
 {
-  // A flow that is before last updatetime, ignore it
-  if (timestamp <= updatetime)   
-      return;
-
-  // We come here only if training is done
-  if (training_done)
+  for (int i=0;i<BRICK_DIMENSION;i++)
     {
-      for (int i=0;i<BRICK_DIMENSION;i++)
+      for (int j=vol; j<=sym; j++)
 	{
-	  for (int j=vol; j<=sym; j++)
+	  int data;
+	  if (j == vol)
+	    data = c->databrick_p[i];
+	  else
+	    data = c->databrick_s[i];
+	  // Only update if everything looks normal 
+	  if (!is_abnormal[i])
 	    {
-	      int data;
-	      if (j == vol)
-		data = cells[timestamp]->databrick_p[i];
-	      else
-		data = cells[timestamp]->databrick_s[i];
-	      // Only update if everything looks normal 
-	      if (!is_abnormal[i])
+	      // Update avg and ss incrementally
+	      stats[cur][n][j][i] += 1;
+	      if (stats[cur][n][j][i] == 1)
 		{
-		  // Update avg and ss incrementally
-		  stats[cur][n][j][i] += 1;
-		  if (stats[cur][n][j][i] == 1)
-		    {
-		      stats[cur][avg][j][i] =  data;
-		      stats[cur][ss][j][i] =  0;
-		    }
-		  else
-		    {
-		      int ao = stats[cur][avg][j][i];
-		      stats[cur][avg][j][i] = stats[cur][avg][j][i] +
-			(data - stats[cur][avg][j][i])/stats[cur][n][j][i];
-		      stats[cur][ss][j][i] = stats[cur][ss][j][i] +
-			(data-ao)*(data - stats[cur][avg][j][i]);
-		    }
+		  stats[cur][avg][j][i] =  data;
+		  stats[cur][ss][j][i] =  0;
+		}
+	      else
+		{
+		  int ao = stats[cur][avg][j][i];
+		  stats[cur][avg][j][i] = stats[cur][avg][j][i] +
+		    (data - stats[cur][avg][j][i])/stats[cur][n][j][i];
+		  stats[cur][ss][j][i] = stats[cur][ss][j][i] +
+		    (data-ao)*(data - stats[cur][avg][j][i]);
 		}
 	    }
 	}
-      updatetime = timestamp;
     }
-  // If training is done and it is time for current values to become
-  // historical
-  if (timestamp - statstime >= parms["min_train"] && training_done)
+  trained++;
+  if (trained == parms["min_train"])
     {
-      statstime = timestamp;
-      for (int j = n; j <= ss; j++)
-	for (int k = vol; k <= sym; k++)
+      cout<<"Current becomes historical "<<endl;
+      if (!training_done)
+	{
+	  training_done = true;
+	  cout<<"Training has completed\n";
+	}
+      trained = 0;
+     
+      for (int x = ss; x >= n; x--)
+	for (int j = vol; j <= sym; j++)
 	  for(int i = 0; i<BRICK_DIMENSION; i++)
 	  {
 	    // Check if we have enough samples.
 	    // If the attack was long maybe we don't
-	    if (stats[cur][n][k][i] <
-		parms["min_train"]/parms["interval"]*MIN_SAMPLES)
-	      continue;
-	    stats[hist][j][k][i] = stats[cur][j][k][i];
-	    stats[cur][j][k][i] = 0;
+	    if (stats[cur][n][j][i] <
+		parms["min_train"]*MIN_SAMPLES)
+		continue;
+	    stats[hist][x][j][i] = stats[cur][x][j][i];
+	    stats[cur][x][j][i] = 0;
 	  }
     }
 }
 
-// This function detects an attack
-void detect_attack(long timestamp)
+void findBestSignature(int i, cell* c)
 {
-  // This timeslot is too late for detection
-  if (timestamp <= updatetime)
-    return;
-
-  // If verbose, output debugging statistics into DB
-  if (0) //verbose)
+  flow_t bestsig = {0,0,0,0,0};
+  int oci = 0;
+  int maxoci = 0;
+  int totoci = c->databrick_s[i];
+  
+  // Go through candidate signatures
+  for (int s=0; s<8; s++)
     {
-      stmt = con->prepareStatement ("INSERT INTO stats VALUES (?, ?, ?)");
-
-      DataBuf buffer1((char*)cells[timestamp]->databrick_p, 4*sizeof(int)*BRICK_DIMENSION+sizeof(int));
-      DataBuf buffer2((char*)cells[timestamp]->databrick_s, 4*sizeof(int)*BRICK_DIMENSION+sizeof(int));
-
-      istream stream1(&buffer1);
-      istream stream2(&buffer2);
-      
-      stmt->setUInt(1, timestamp);
-      stmt->setBlob(2, &stream1);
-      stmt->setBlob(3, &stream2);
-      stmt->executeUpdate(); 
-
-      delete stmt;
-    }
-  if (0) //verbose && isfiltered)
+      if (empty(samples.bins[i].flows[s].flow))
+	continue;
+      // Print out each signature for debugging
+      if (verbose)
+	cout<<"SIG: "<<i<<" candidate "<<printsignature(samples.bins[i].flows[s].flow)<<" v="<<samples.bins[i].flows[s].len<<" o="<<samples.bins[i].flows[s].oci<<" toto="<<totoci<<endl;
+      // This signature covers more than the maximum, remember
+      // this new maximum
+      if (abs(samples.bins[i].flows[s].oci) > abs(maxoci))
+	maxoci = samples.bins[i].flows[s].oci;
+      // Is it a more specific signature with also much
+      // more coverage
+      if (abs(samples.bins[i].flows[s].oci) > HMB*abs(oci) ||
+	  (HMB*abs(samples.bins[i].flows[s].oci) > abs(maxoci) && bettersig(samples.bins[i].flows[s].flow, bestsig)))
+	{
+	  bestsig = samples.bins[i].flows[s].flow;
+	  oci = samples.bins[i].flows[s].oci;
+	}
+    } 
+  if (verbose)
+    cout<<"SIG: "<<i<<" best sig "<<printsignature(bestsig)<<" Empty? "<<empty(bestsig)<<" oci "<<maxoci<<" out of "<<totoci<<endl;
+  
+  // Remember the signature if it is not empty and can filter
+  // at least FILTER_THRESH flows in the sample
+  if (!empty(bestsig) && (float)oci/totoci > FILTER_THRESH)
     {
-      stmt = con->prepareStatement ("INSERT INTO filtered VALUES (?, ?, ?)");
-
-      DataBuf buffer1((char*)cells[timestamp]->wfilter_p, 4*sizeof(int)*BRICK_DIMENSION+sizeof(int));
-      DataBuf buffer2((char*)cells[timestamp]->wfilter_s, 4*sizeof(int)*BRICK_DIMENSION+sizeof(int));
-
-      istream stream1(&buffer1);
-      istream stream2(&buffer2);
-      
-      stmt->setUInt(1, timestamp);
-      stmt->setBlob(2, &stream1);
-      stmt->setBlob(3, &stream2);
-      stmt->executeUpdate(); 
-
-      delete stmt;
+      map <flow_t, int> m1, m2;
+      // Insert the signature into the array for that bin
+      if (signatures.find(i) == signatures.end())
+	{
+	  stat_f sf = {0, c->databrick_p[i], c->databrick_s[i], bestsig,m1,m2, 0};
+	  //signatures.insert(pair<int, stat_f>(i,sf));  // Jelena fix
+	}
+      else
+	{
+	  // or replace the signature already there
+	  // and reset all the stats
+	  signatures[i].sig = bestsig;
+	  signatures[i].nflows = 0;
+	  signatures[i].matchedflows.clear();
+	  signatures[i].reverseflows.clear();
+	  signatures[i].timestamp = 0;
+	  signatures[i].vol = c->databrick_p[i];
+	  signatures[i].oci = c->databrick_s[i];
+	}
+      // Write the start of the attack into alerts
+      ofstream out;
+      out.open("alerts.txt", std::ios_base::app);
+      out<<i/BRICK_UNIT<<" "<<curtime<<" ";
+      out<<"START "<<i<<" "<< c->databrick_p[i];
+      out<<" "<<c->databrick_s[i]<<" ";
+      out<<printsignature(bestsig)<<endl;
+      out.close();
     }
+  // Did not find a good signature
+  // drop the attack signal and try again later
+  else
+    {
+      if (verbose)
+	cout << "AT: Did not find good signature for attack "<<
+	  " on bin "<<i<<" best sig "<<empty(bestsig)<<
+	  " coverage "<<(float)oci/totoci<<" thresh "<<
+	  FILTER_THRESH<<endl;
+      is_attack[i] = 0;
+    }
+}
 
+// This function detects an attack
+void detect_attack(cell* c)
+{
   // For each bin
   for (int i=0;i<BRICK_DIMENSION;i++)
     {
@@ -616,27 +723,28 @@ void detect_attack(long timestamp)
       double avgs = stats[hist][avg][sym][i];
       double stds = sqrt(stats[hist][ss][sym][i]/(stats[hist][n][sym][i]-1));
 
+      /*
       // Attack is going on, it was reported and the bin is still abnormal
       if (is_attack[i] > 0 && is_abnormal[i] > 0 && reported[i] > 1)
 	{
 	  // How effective is filtering?
-	  if (cells[timestamp]->databrick_s[i] != 0)
+	  if (cells[timestamp].databrick_s[i] != 0)
 	    {
 	      // If they are different sign, just assume everything is filtered
-	      double r = (double)cells[timestamp]->wfilter_s[i]/cells[timestamp]->databrick_s[i];
+	      double r = (double)cells[timestamp].wfilter_s[i]/cells[timestamp].databrick_s[i];
 	      if (r < 0)
 		{
 		  effective[i] = effective[i]*ALPHA + (1-ALPHA);
-		  cout<<"diff sign "<<r<<" filtering is "<<effective[i]<<" effective for bin "<<i<<" w filter "<<cells[timestamp]->wfilter_s[i]<<" total "<<cells[timestamp]->databrick_s[i]<<endl;
+		  cout<<"diff sign "<<r<<" filtering is "<<effective[i]<<" effective for bin "<<i<<" w filter "<<cells[timestamp].wfilter_s[i]<<" total "<<cells[timestamp].databrick_s[i]<<endl;
 		}
 	      else
 		{
 		  effective[i] = effective[i]*ALPHA+r*(1-ALPHA);
-		  cout<<"same sign "<<r<<" filtering is "<<effective[i]<<" effective for bin "<<i<<" w filter "<<cells[timestamp]->wfilter_s[i]<<" total "<<cells[timestamp]->databrick_s[i]<<endl;
+		  cout<<"same sign "<<r<<" filtering is "<<effective[i]<<" effective for bin "<<i<<" w filter "<<cells[timestamp].wfilter_s[i]<<" total "<<cells[timestamp].databrick_s[i]<<endl;
 		}
 	    }
 	  if (verbose)
-	    cout<<"Filtering is "<<effective[i]<<" effective for bin "<<i<<" w filter "<<cells[timestamp]->wfilter_s[i]<<" total "<<cells[timestamp]->databrick_s[i]<<endl;
+	    cout<<"Filtering is "<<effective[i]<<" effective for bin "<<i<<" w filter "<<cells[timestamp].wfilter_s[i]<<" total "<<cells[timestamp].databrick_s[i]<<endl;
 	  if (effective[i] < EFF_THRESH)
 	    {
 	      // Signal end of attack. There is anomaly but the signature we have is not
@@ -675,14 +783,18 @@ void detect_attack(long timestamp)
       // How many intervals have elapsed since the attack was reported
       if (reported[i])
 	reported[i]++;
-
+      */
       // If both volume and asymmetry are abnormal and training has completed
-      if (training_done && abnormal(vol, i, timestamp)
-	  && abnormal(sym, i, timestamp))
+
+      int a = abnormal(vol, i, c);
+      int b = abnormal(sym, i, c);
+      int volume = c->databrick_p[i];
+      int asym = c->databrick_s[i];
+      if (training_done && abnormal(vol, i, c) && abnormal(sym, i, c))
 	{
 	  if (verbose)
-	    cout<<timestamp<<" abnormal for "<<i<<" points "<<is_abnormal[i]<<" oci "<<cells[timestamp]->databrick_s[i]<<" ranges " <<avgs<<"+-"<<stds<<", vol "<<cells[timestamp]->databrick_p[i]<<" ranges " <<avgv<<"+-"<<stdv<<endl;
-
+	    cout<<" abnormal for "<<i<<" points "<<is_abnormal[i]<<" oci "<<c->databrick_s[i]<<" ranges " <<avgs<<"+-"<<stds<<", vol "<<c->databrick_p[i]<<" ranges " <<avgv<<"+-"<<stdv<<endl;
+	  
 	  // Increase abnormal score, but cap at attack_high/interval
 	  if (is_abnormal[i] < int(parms["attack_high"]/parms["interval"]))
 	      is_abnormal[i]++;
@@ -698,92 +810,14 @@ void detect_attack(long timestamp)
 	      reported[i] = 0;
 	      effective[i] = 0;
 	      if (verbose)
-		cout<<"AT: Attack detected on "<<i<<" but not reported yet, timestamp "<<timestamp<<endl;
-	      /*
-	      // Find closest timestamp and calculate signatures
-	      int s = cells[timestamp].databrick_s[i];
-	      long t = calcSignature(timestamp, i, s);
-	      if (t > 0)
-		{		 		  
-		  // Find the best signature
-		  flow_t bestsig = {0,0,0,0,0};
-		  int oci = 0;
-		  int maxoci = 0;
-		  int totoci = cells[t].databrick_s[i];
-
-		  // Go through candidate signatures
-		  for (int s=0; s<8; s++)
-		    {
-		      if (empty(samples[t].bins[i].flows[s].flow))
-			continue;
-		      // Print out each signature for debugging
-		      if (verbose)
-			cout<<"SIG: "<<i<<" candidate "<<printsignature(samples[t].bins[i].flows[s].flow)<<" v="<<samples[t].bins[i].flows[s].len<<" o="<<samples[t].bins[i].flows[s].oci<<" toto="<<totoci<<endl;
-		      // This signature covers more than the maximum, remember
-		      // this new maximum
-		      if (abs(samples[t].bins[i].flows[s].oci) > abs(maxoci))
-			maxoci = samples[t].bins[i].flows[s].oci;
-		      // Is it a more specific signature with also much
-		      // more coverage
-		      if (abs(samples[t].bins[i].flows[s].oci) > HMB*abs(oci) ||
-			  (HMB*abs(samples[t].bins[i].flows[s].oci) > abs(maxoci) && bettersig(samples[t].bins[i].flows[s].flow, bestsig)))
-			{
-			  bestsig = samples[t].bins[i].flows[s].flow;
-			  oci = samples[t].bins[i].flows[s].oci;
-			}
-		   } 
-		  if (verbose)
-		    cout<<"SIG: "<<i<<" best sig "<<printsignature(bestsig)<<" Empty? "<<empty(bestsig)<<" oci "<<maxoci<<" out of "<<totoci<<endl;
-		  
-		  // Remember the signature if it is not empty and can filter
-		  // at least FILTER_THRESH flows in the sample
-		  if (!empty(bestsig) && (float)oci/totoci > FILTER_THRESH)
-		    {
-		      map <flow_t, int> m1, m2;
-		      // Insert the signature into the array for that bin
-		      if (signatures.find(i) == signatures.end())
-			{
-			  stat_f sf = {t, cells[t].databrick_p[i], cells[t].databrick_s[i], bestsig,m1,m2, 0};
-			  //signatures.insert(pair<int, stat_f>(i,sf));  // Jelena fix
-			}
-		      else
-			{
-			  // or replace the signature already there
-			  // and reset all the stats
-			  signatures[i].sig = bestsig;
-			  signatures[i].nflows = 0;
-			  signatures[i].matchedflows.clear();
-			  signatures[i].reverseflows.clear();
-			  signatures[i].timestamp = t;
-			  signatures[i].vol = cells[t].databrick_p[i];
-			  signatures[i].oci = cells[t].databrick_s[i];
-			}
-		    }
-		  // Did not find a good signature
-		  // drop the attack signal and try again later
-		  else
-		    {
-		      if (verbose)
-			cout << "AT: Did not find good signature for attack "<<
-			  " on bin "<<i<<" best sig "<<empty(bestsig)<<
-			  " coverage "<<(float)oci/totoci<<" thresh "<<
-			  FILTER_THRESH<<endl;
-		      is_attack[i] = 0;
-		    }
-		}
-	      // There were no samples to be found
-	      else
-		{
-		  if (verbose)
-		    cout << "AT: Did not find any samples for attack on bin "
-			 <<i<<endl;
-		  is_attack[i] = 0;
-		}*/
+		cout<<"AT: Attack detected on "<<i<<" but not reported yet "<<endl;
+	     
+	      // Find the best signature
+	      findBestSignature(i, c);
 	    }
 	}
       // Training is completed and both volume and symmetry are normal
-      else if (training_done && !abnormal(vol, i, timestamp) &&
-	       !abnormal(sym, i, timestamp))
+      else if (training_done && !abnormal(vol, i, c) && !abnormal(sym, i, c))
 	{
 	  // Reduce abnormal score
 	  if (is_abnormal[i] > 0)
@@ -797,23 +831,13 @@ void detect_attack(long timestamp)
 		{
 		  if (verbose)
 		    cout <<"AT: Attack has stopped in destination bin "<< i
-			 << " time " << timestamp <<" sig "
+			 <<" sig "
 			 <<printsignature(signatures[i].sig)<<endl;
 		  // Write the end of the attack into alerts
 		  ofstream out;
 		  out.open("alerts.txt", std::ios_base::app);
-		  out << "STOP "<<i<<" "<<timestamp<<endl;
+		  out << "STOP "<<i<<endl;
 		  out.close();
-
-		  // Write it into DB
-		  stmt = con->prepareStatement ("UPDATE attacks SET stop=? WHERE bin=? and stop IS NULL");
-	  
-		  stmt->setUInt(1, timestamp);
-		  stmt->setInt(2, i);
-		  stmt->executeUpdate();
-		  cout<<"Updated DB set stop="<<timestamp<<" for attack on bin "<<i<<endl;
-			
-		  delete stmt;
 		}
 	      // Delete signature if exists
 	      if (signatures.find(i) != signatures.end())
@@ -952,6 +976,7 @@ void collectStats(int bucket, vector<flow_p>::iterator fit, map<long,cell*>::ite
 }
 
 // Go through flows for a given timestamp and collect statistics
+/*
 void processFlows(long timestamp, long starttime)
 {
   long difft = time(0) - starttime + 1;
@@ -1169,9 +1194,10 @@ void processFlows(long timestamp, long starttime)
   // Erase samples if any
   if (sfront != srear)
     {
-      sfront = (sfront + 1) % MAX_SAMPLES;
+      sfront = (sfront + 1) % QSIZE;
     }
 }
+*/
 
 // Read nfdump flow format
 void
@@ -1192,6 +1218,7 @@ amonProcessingNfdump (char* line, long time)
     dur = 3600;
   int pkts, bytes;
 
+  // JMM: 100 s up to here
   // Get source and destination IP and port and protocol 
   flow_t flow = {0,0,0,0,0,0};
   int proto = atoi(line+delimiters[4]);
@@ -1200,11 +1227,13 @@ amonProcessingNfdump (char* line, long time)
   flow.dst = strtol(line+delimiters[13], &tokene, 10);
   flow.dport = atoi(line+delimiters[14]); 
   flow.proto = proto;
+  // JMM 100 s up to here
   flow.slocal = islocal(flow.src);
   flow.dlocal = islocal(flow.dst);
   bytes = atoi(line+delimiters[22]);
-  processedflows++;
   processedbytes+=bytes;
+  // JMM: 115 s up to here
+
   // Cross-traffic, do nothing
   if (!flow.slocal && !flow.dlocal)
     {
@@ -1257,77 +1286,31 @@ amonProcessingNfdump (char* line, long time)
 // Ever so often go through flows and process what is ready
 void *reset_transmit (void* passed_parms)
 {
-  unsigned long starttime = time(0);
-  while (1)
-    {
-      long curtime = 0;
-      int fresh = 0;
+  // Serialize access to cells
+  pthread_mutex_lock (&cells_lock);
 
-      // Serialize access to flows
-      pthread_mutex_lock (&flows_lock);
+  // We will process this one now
+  int current = cfront;
 
-      
-      // Find timestamps that are not fresh
-      for (map<long,time_flow*>::iterator it=timeflows.begin(); it != timeflows.end(); )
-	{
-	  curtime = it->first;
-	  int diff = curtime - firsttime;
-
-	  if (it->second->fresh || fresh)
-	    {
-	      // Or they are fresh but they have enough flows
-	      if (fresh == 0 || (fresh <= MIN_FRESH &&
-				 it->second->flows.size() >= MIN_FLOWS))
-		{
-		  fresh = 1;
-		  freshtime = curtime;
-		}
-	      it->second->fresh = 0;
-	      it++;
-	      continue;
-	    }
-	  else
-	    {
-	      // Process this batch of flows
-	      // Collect stats, detect attack, etc
-	      processFlows(it->first, starttime);
-	      delete(it->second);
-	      timeflows.erase(it++);
-	    }
-	}
-      // Release access to flows
-      pthread_mutex_unlock (&flows_lock);
-
-      
-      // Check if there is an attack that was waiting
-      // a long time to be reported. Perhaps we had too specific
-      // signature and we will never collect enough matches
-      // Serialize access to stats
-      pthread_mutex_lock (&cells_lock);
-
-      for (map<int,stat_f>::iterator sit = signatures.begin(); sit != signatures.end();)
-	{
-	  long t = sit->second.timestamp;
-	  if (freshtime - t < parms["report_thresh"])
-	    {
-	      sit++;
-	      continue;
-	    }
-	  if (is_attack[sit->first] && !reported[sit->first])
-	    {
-	      if (verbose)
-		cout<<"AT: attack on "<<sit->first<<" not enough matching flows "<<sit->second.nflows<<" now is "<<freshtime<<" attack detected at "<<t<<" waited "<<parms["report_thresh"]<<endl;
-	      is_attack[sit->first] = 0;
-	      signatures.erase(sit++);
-	    }
-	  else
-	    sit++;
-	}
-      // Release the lock to access stats
-      pthread_mutex_unlock (&cells_lock);
-      // Sleep a bit and try again
-      sleep(1); 
-    }
+  // This one will be next for processing
+  cfront = (cfront + 1)%QSIZE;
+  if (cfront == crear)
+    cempty = true;
+  
+  // Serialize access to cells
+  pthread_mutex_unlock (&cells_lock);
+  
+  cell* c = &cells[current];
+  
+  // Check if there is an attack that was waiting
+  // a long time to be reported. Perhaps we had too specific
+  // signature and we will never collect enough matches
+  // Serialize access to stats
+  update_stats(c);
+  if (training_done)
+    detect_attack(c);
+  cout<<"Done "<<time(0)<<endl;
+  // Detect attack here
   pthread_exit (NULL);
 }
 
@@ -1380,7 +1363,7 @@ void load_history()
       in.close();
       if (!malformed)
 	{
-	  training_done = 1;
+	  training_done = true;
 	  cout<<"Training data loaded"<<endl;
 	}
     }  
@@ -1409,7 +1392,7 @@ int main (int argc, char *argv[])
   // Load service port numbers
   numservices = loadservices("services.txt");
   cout<<"Services "<<numservices<<endl;
-  numprefs = loadprefixes("localprefs.txt");
+  loadprefixes("localprefs.txt");
   cout<<"Num prefs "<<numprefs<<endl;
   
   char c, buf[32];
@@ -1453,7 +1436,7 @@ int main (int argc, char *argv[])
       exit(-1);
     }
   cout<<"Verbose "<<verbose<<endl;
-  // Connect to DB
+  /* Connect to DB
   try {
     driver = get_driver_instance();
     con = driver->connect("tcp://127.0.0.1:3306", "amon-senss", "St33llab@isi");
@@ -1462,10 +1445,7 @@ int main (int argc, char *argv[])
   catch (sql::SQLException &e) {
     cerr<<"Could not connect to the DB\n";
   }
-
-  pthread_t thread_id;
-  pthread_create (&thread_id, NULL, reset_transmit, NULL); 
-
+  */
 
 
   clock_gettime(CLOCK_MONOTONIC, &last_entry);      
@@ -1590,6 +1570,32 @@ int main (int argc, char *argv[])
 		double diff = time(0) - start;
 		cout<<"Processed "<<allflows<<", 1M in "<<diff<<endl;
 		start = time(0);
+	      }
+	    processedflows++;
+	    if (processedflows == MAX_FLOWS)
+	      {
+		pthread_mutex_lock (&cells_lock);
+		// This one we will work on next
+		crear = (crear + 1)%QSIZE;
+		cout<<"Next cell at "<<crear<<endl;
+		if (crear == cfront && !cempty)
+		  {
+		    perror("QSIZE is too small\n");
+		    exit(1);
+		  }
+		// zero out stats
+		cell* c = &cells[crear];
+		memset(c->databrick_p, 0, BRICK_DIMENSION*sizeof(unsigned int));
+		memset(c->databrick_s, 0, BRICK_DIMENSION*sizeof(int));
+		memset(c->wfilter_p, 0, BRICK_DIMENSION*sizeof(unsigned int));
+		memset(c->wfilter_s, 0, BRICK_DIMENSION*sizeof(int));	  
+		// and it will soon be full
+		cempty = false;
+		pthread_mutex_unlock (&cells_lock);
+		
+		pthread_t thread_id;
+		pthread_create (&thread_id, NULL, reset_transmit, NULL); 
+		processedflows = 0;
 	      }
 	    amonProcessingNfdump(line, epoch); 
 	  }

@@ -20,13 +20,13 @@
 #ifndef __UTILS_H
 #define __UTILS_H
 
-#include <openssl/sha.h>
 #include <netinet/in.h>
 #include <stdint.h>
 #include <vector>
 #include <string>
 #include <streambuf>
 #include <map>
+#include <set>
 
 using namespace std;
 
@@ -36,18 +36,18 @@ enum ways{FOR, LOC, LOCPREF, SERV, CLI};
 #define BRICK_UNIT 701           // How many bins we have. This should NOT be a power of 2
 #define BRICK_DIMENSION NUMF*BRICK_UNIT // There are NUMF variants of how we can bin the traffic (e.g., by port, by dst IP, etc.)
 #define REPORT_THRESH 30
-#define MIN_FLOWS 100000          // This parameter and the next ensure we report on time intervals that
+#define MAX_FLOWS 1000000          // Each MAX_FLOWS we run attack detection
 #define MIN_FRESH 10              // have seen most of their records
 #define HMB 1.1                   // This is how much more a less specific signature should catch to be accepted
 #define MAXLINE 255               // Maximum length for reading strings
 #define AR_LEN 30                 // How many delimiters may be in an array
 #define MAX_DIFF 10               // How close should a timestamp be to the one where attack is detected
 #define NF 8                      // Number of different signatures for a flow
-#define MAX_SAMPLES 20            // How many timestamps can I accumulate before processing
+#define QSIZE 20                 // How many timestamps can I accumulate before processing
 
 #define FILTER_THRESH 0.5         // A signature must explain this much of asymmetry
 #define SIG_FLOWS 100             // This many flows must be collected, at least, to evaluate a signature
-#define MIN_SAMPLES 0.1           // We must have samples for at least this fraction of training period to
+#define MIN_SAMPLES 0.5           // We must have samples for at least this fraction of training period to
                                   // roll over current stats into historical stats
 
 #define ALPHA 0.5                 // Constant for weighted average of filtering effectiveness
@@ -169,7 +169,7 @@ int sgn(double x);
 int bettersig(flow_t a, flow_t b);
 string printsignature(flow_t s);
 int loadservices(const char* fname);
-int loadprefixes(const char* fname);
+void loadprefixes(const char* fname);
 int isservice(int port);
 int islocal(u_int32_t ip);
 

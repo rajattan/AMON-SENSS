@@ -180,8 +180,9 @@ int isservice(int port)
 }
 
 // Load local prefixes
-map <u_int32_t, int> localprefs;
-int loadprefixes(const char* fname)
+set <u_int32_t> localprefs24;
+set <u_int32_t> localprefs30;
+void loadprefixes(const char* fname)
 {
   ifstream inFile;
   int i = 0;
@@ -195,18 +196,44 @@ int loadprefixes(const char* fname)
       if (ptr == NULL)
 	continue;
       *ptr=0;
-      localprefs.insert(pair<u_int32_t, int>(todec(pref), atoi(ptr+1)));
+      int mask = atoi(ptr+1);
+      u_int32_t dpref = todec(pref);
+      cout<<" Pref "<<dpref<<" mask "<<mask<<" line "<<pref<<endl;
+      if (mask <= 24)
+	{
+	  // how many /24 are there?
+	  int count = 1 << (24 - mask);
+	  cout<<" /24x "<<count<<endl;
+	  for (int i = 0; i < count; i++)
+	    {
+	      localprefs24.insert(dpref);
+	      cout<<"Inserted "<<dpref<<endl;
+	      dpref += 256;
+	    }
+	}
+      else
+	{
+	  // how many /30 are there"
+	  int count = 1 << (30 - mask);
+	  cout<<" / 30s "<<count<<endl;
+	  for (int i = 0; i < count; i++)
+	    {
+	      localprefs30.insert(dpref);
+	      dpref += 4;
+	    }
+	}
     }
-  return localprefs.size();
+  cout<<"THere are "<<localprefs24.size()<<" /24s and "<<localprefs30.size()<<" IPs\n";
 }
 
 // Is this a local prefix?
 int islocal(u_int32_t ip)
 {
-  for (map<u_int32_t, int>::iterator it = localprefs.begin(); it != localprefs.end(); it++)
-    {
-      if ((ip & (~0 << (32 - it->second))) == it->first)
-	return true;
-    }
+  int pref1 = ip & 0xffffff00;
+  int pref2 = ip & 0xfffffffc;
+  if (localprefs24.find(pref1) != localprefs24.end())
+    return true;
+  if (localprefs30.find(pref2) != localprefs30.end())
+    return true;
   return false;
 }
