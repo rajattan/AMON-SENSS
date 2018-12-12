@@ -43,7 +43,7 @@ enum ways{FOR, LOC, LOCPREF, SERV, CLI};
 #define AR_LEN 30                 // How many delimiters may be in an array
 #define MAX_DIFF 10               // How close should a timestamp be to the one where attack is detected
 #define NF 8                      // Number of different signatures for a flow
-#define QSIZE 20                 // How many timestamps can I accumulate before processing
+#define QSIZE 100                 // How many timestamps can I accumulate before processing
 
 #define FILTER_THRESH 0.5         // A signature must explain this much of asymmetry
 #define SIG_FLOWS 100             // This many flows must be collected, at least, to evaluate a signature
@@ -121,21 +121,10 @@ struct time_flow
   int fresh;
 };
 
-// This structure keeps some statistics on a candidate signature
-struct stat_f
-{
-  long timestamp;
-  int vol;
-  int oci;
-  flow_t sig;
-  map <flow_t,int> matchedflows;
-  map <flow_t,int> reverseflows;
-  int nflows;
-};
-
 // Some statistics for the flow
 struct stat_r
 {
+  flow_t sig;
   int vol;
   int oci;
 };
