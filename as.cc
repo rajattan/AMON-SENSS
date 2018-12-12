@@ -273,7 +273,7 @@ int empty(flow_t sig)
 void clearSamples(int index)
 {
   flow_t key={0,0,0,0,0};
-  for (int s=0; s<8; s++)
+  for (int s=1; s<NF; s++)
     {
       samples.bins[index].flows[s].flow = key;
       samples.bins[index].flows[s].len = 0;
@@ -284,32 +284,19 @@ void clearSamples(int index)
 void addSample(int index, flow_p* f, flow_t* key)
 {
   // Create some partial signatures for this flow, like src-dst combination,
-  // src-sport, etc
-  for (int s=0; s<8; s++)
+  // src-sport, etc. Don't allow just protocol
+  for (int s=1; s<NF; s++)
     {
       flow_t k = *key;
       k.proto = f->flow.proto;
+      if ((s & 8) > 0)
+	k.src = f->flow.src;
       if ((s & 4) > 0)
-	{
-	  // Jelena perhaps should deal with protocols
-	  if (k.src == 0 && k.dst == f->flow.dst)
-	    k.src = f->flow.src;
-	  else if (k.src == f->flow.src && k.dst == 0)
-	    k.dst = f->flow.dst;
-	  // Both are zero, assume dst
-	  else
-	    k.dst = f->flow.dst;
-	}
+	k.sport = f->flow.sport;
       if ((s & 2) > 0)
-	if (k.sport == 0)
-	  k.sport = f->flow.sport;
-	else
-	  k.src = f->flow.src;
+	k.dst = f->flow.dst;
       if ((s & 1) > 0)
-	if (k.dport == 0)
-	  k.dport = f->flow.dport;
-	else
-	  k.src = f->flow.src;
+	k.dport = f->flow.dport;
       // src, dst, sport, dport
       // Overload len so we can track frequency of contributions
       // Jelena - there was continue here
@@ -388,7 +375,8 @@ addSamples(int s_bucket, int d_bucket, flow_p* fp, cell* c, flow_t* key)
 	    return;
 	}
 
-      if (!is_attack[bucket] && training_done && fp->oci != 0                                                                    	  && sgn(fp->oci) == sgn(c->databrick_s[bucket]))
+      if (!is_attack[bucket] && training_done && fp->oci != 0
+	  && sgn(fp->oci) == sgn(c->databrick_s[bucket]))
 	{
 	  addSample(bucket, fp, key);
 	}
@@ -400,10 +388,7 @@ addSamples(int s_bucket, int d_bucket, flow_p* fp, cell* c, flow_t* key)
 bool shouldFilter(int bucket, flow_t flow)
 {
   if (!empty(signatures[bucket].sig) && match(flow,signatures[bucket].sig))
-    {
-      cout<<bucket<<" Filtering flow "<<printsignature(flow)<<endl;
-      return true;
-    }
+    return true;
   else
     return false;
 }
@@ -544,10 +529,7 @@ amonProcessing(flow_t flow, int len, long start, long end, int oci)
 	}
     }
   if (is_filtered)
-    {
-      cout<<"Filtered flow "<<printsignature(flow)<<endl;
-      return;
-    }
+    return;
 
   for (int way = FOR; way < CLI; way++) // SERV is included in CLI
     {
@@ -560,13 +542,11 @@ amonProcessing(flow_t flow, int len, long start, long end, int oci)
 	      s_bucket = myhash(flow.src, 0, FOR);
 	      c->databrick_p[s_bucket] += len;
 	      c->databrick_s[s_bucket] += oci;
-	      key.src = flow.src;
 	    }
 	  if (flow.slocal)
 	    {
 	      d_bucket = myhash(flow.dst, 0, FOR);
 	      c->databrick_s[d_bucket] += oci;
-	      key.dst = flow.dst;
 	    }
 	}
       else if (way == LOC || way == LOCPREF)
@@ -576,13 +556,11 @@ amonProcessing(flow_t flow, int len, long start, long end, int oci)
 	      d_bucket = myhash(flow.dst, 0, way);
 	      c->databrick_p[d_bucket] += len;
 	      c->databrick_s[d_bucket] += oci;
-	      key.dst = flow.dst;
 	    }
 	  if (flow.slocal)
 	    {
 	      s_bucket = myhash(flow.src, 0, way);
 	      c->databrick_s[s_bucket] += oci;
-	      key.src = flow.src;
 	    }	      
 	}
       else if (way == SERV) // CLI is included in SERV
@@ -592,12 +570,10 @@ amonProcessing(flow_t flow, int len, long start, long end, int oci)
 	      if (isservice(flow.dport))
 		{
 		  d_bucket = myhash(0, flow.dport, SERV);
-		  key.dport = flow.dport;
 		}
 	      else if (isservice(flow.sport))
 		{
 		  d_bucket = myhash(0, flow.sport, CLI);
-		  key.sport = flow.sport;
 		}
 	      else
 		{
@@ -609,12 +585,10 @@ amonProcessing(flow_t flow, int len, long start, long end, int oci)
 	      if (isservice(flow.sport))
 		{
 		  s_bucket = myhash(0, flow.sport, SERV);
-		  key.sport = flow.sport;
 		}
 	      else if (isservice(flow.dport))
 		{
 		  s_bucket = myhash(0, flow.dport, CLI);
-		  key.dport = flow.dport;
 		}
 	      else
 		{
@@ -727,7 +701,7 @@ void findBestSignature(int i, cell* c)
   int totoci = c->databrick_s[i];
   
   // Go through candidate signatures
-  for (int s=0; s<8; s++)
+  for (int s=1; s<NF; s++)
     {
       if (empty(samples.bins[i].flows[s].flow))
 	continue;
@@ -754,7 +728,9 @@ void findBestSignature(int i, cell* c)
   // at least FILTER_THRESH flows in the sample
   if (!empty(bestsig) && (float)oci/totoci > FILTER_THRESH)
     {
-      map <flow_t, int> m1, m2;
+      if (verbose)
+	cout<<"ISIG: "<<i<<" installed sig "<<printsignature(bestsig)<<endl;
+
       // insert signature and reset all the stats
       signatures[i].sig = bestsig;
       signatures[i].vol = 0;

@@ -42,7 +42,7 @@ enum ways{FOR, LOC, LOCPREF, SERV, CLI};
 #define MAXLINE 255               // Maximum length for reading strings
 #define AR_LEN 30                 // How many delimiters may be in an array
 #define MAX_DIFF 10               // How close should a timestamp be to the one where attack is detected
-#define NF 8                      // Number of different signatures for a flow
+#define NF 16                     // Number of different signatures for a flow
 #define QSIZE 100                 // How many timestamps can I accumulate before processing
 
 #define FILTER_THRESH 0.5         // A signature must explain this much of asymmetry
