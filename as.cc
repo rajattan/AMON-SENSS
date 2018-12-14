@@ -52,7 +52,7 @@
 
 #include <dirent.h>
 
-/* MySQL includes
+// MySQL includes
 #include "mysql_connection.h"
 
 #include <cppconn/driver.h>
@@ -60,7 +60,7 @@
 #include <cppconn/resultset.h>
 #include <cppconn/statement.h>
 #include <cppconn/prepared_statement.h>
-*/
+
 
 #include "utils.h"
 
@@ -129,7 +129,7 @@ ofstream debug[BRICK_DIMENSION];
 int is_abnormal[BRICK_DIMENSION];
 // Did we detect an attack in this bin
 int is_attack[BRICK_DIMENSION];
-// How many attacks are we filtering currently
+// Are we simulating filtering. This is not for live experiments.
 bool sim_filter = false;
 
 // Did we complete training
@@ -163,12 +163,12 @@ double stats[2][3][2][BRICK_DIMENSION]; // historical and current stats for atta
 // Parameters from as.config
 map<string,double> parms;
 
-/* Variables for DB access
+// Variables for DB access
 sql::Driver *driver;
 sql::Connection *con;
 sql::PreparedStatement *stmt;
 sql::ResultSet *res;
-*/
+
 
 // Keeping track of procesed flows
 long int processedflows = 0;
@@ -732,10 +732,14 @@ void findBestSignature(int i, cell* c)
 	cout<<"ISIG: "<<i<<" installed sig "<<printsignature(bestsig)<<endl;
 
       // insert signature and reset all the stats
-      signatures[i].sig = bestsig;
-      signatures[i].vol = 0;
-      signatures[i].oci = 0;
-
+      // this is needed only for simulation of filtering
+      if (sim_filter)
+	{
+	  signatures[i].sig = bestsig;
+	  signatures[i].vol = 0;
+	  signatures[i].oci = 0;
+	}
+      
       // Write the start of the attack into alerts
       ofstream out;
       out.open("alerts.txt", std::ios_base::app);
@@ -765,6 +769,25 @@ void findBestSignature(int i, cell* c)
 // This function detects an attack
 void detect_attack(cell* c)
 {
+  // If verbose, output debugging statistics into files
+  if (verbose)
+    {
+      stmt = con->prepareStatement ("INSERT INTO stats VALUES (?, ?)");
+      DataBuf buffer((char*)c, sizeof(cell));
+      istream stream(&buffer);
+      
+      stmt->setUInt(1, curtime);
+      stmt->setBlob(2, &stream);
+      try{
+	stmt->executeUpdate();
+	cout<<"Executed one update"<<pthread_self()<<endl;
+      }
+      catch(sql::SQLException &e) {
+	cout << " (MySQL error code: " << e.getErrorCode();
+	cout << ", SQLState: " << e.getSQLState() << " )" << endl;
+      }
+      delete stmt;
+    }
   // For each bin
   for (int i=0;i<BRICK_DIMENSION;i++)
     {
@@ -774,9 +797,7 @@ void detect_attack(cell* c)
       double avgs = stats[hist][avg][sym][i];
       double stds = sqrt(stats[hist][ss][sym][i]/(stats[hist][n][sym][i]-1));
 
-      // If verbose, output debugging statistics into files
-      if (verbose)
-	{
+	  /*
 	  debug[i]<<curtime<<" "<<avgv<<" ";
 	  debug[i]<<stdv<<" "<<c->databrick_p[i]<<" ";
 	  debug[i]<<avgs<<" "<<stds<<" ";
@@ -790,6 +811,7 @@ void detect_attack(cell* c)
 	    debug[i]<<"0 0 ";
 	  debug[i]<<is_attack[i]<<endl;
 	}
+	  */
 
       if (is_attack[i] == true)
 	is_attack[i] = false;
@@ -1083,7 +1105,7 @@ int main (int argc, char *argv[])
 	debug[i]<<"#timestamp mean_vol std_vol cur_vol mean_as std_as cur_as vol_fil as_fil attack\n";
       }
 
-  /* Connect to DB
+  // Connect to DB
   try {
     driver = get_driver_instance();
     con = driver->connect("tcp://127.0.0.1:3306", "amon-senss", "St33llab@isi");
@@ -1092,7 +1114,6 @@ int main (int argc, char *argv[])
   catch (sql::SQLException &e) {
     cerr<<"Could not connect to the DB\n";
   }
-  */
 
 
   clock_gettime(CLOCK_MONOTONIC, &last_entry);      
