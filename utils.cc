@@ -126,8 +126,7 @@ int zeros(flow_t a)
 int bettersig(flow_t a, flow_t b)
 {
   if (zeros(a) < zeros(b) ||
-      ((zeros(a) == zeros(b)) && (a.src > b.src) &&
-       (a.sport > b.sport || a.dport > b.dport)))
+      ((zeros(a) == zeros(b)) && ((a.src != 0 && b.src == 0) || (a.sport != 0 && b.sport == 0) || (a.dport != 0 && b.dport == 0))))
     return 1;
   else
     return 0;

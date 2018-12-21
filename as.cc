@@ -138,6 +138,7 @@ int trained = 0;
 
 // Current time
 long curtime = 0;
+long lasttime = 0;
 
 // Verbose bit
 int verbose = 0;
@@ -159,6 +160,7 @@ enum period{cur, hist};
 enum type{n, avg, ss};
 enum dim{vol, sym};
 double stats[2][3][2][BRICK_DIMENSION]; // historical and current stats for attack detection
+string label;
 
 // Parameters from as.config
 map<string,double> parms;
@@ -376,7 +378,7 @@ addSamples(int s_bucket, int d_bucket, flow_p* fp, cell* c, flow_t* key)
 	}
 
       if (!is_attack[bucket] && training_done && fp->oci != 0
-	  && sgn(fp->oci) == sgn(c->databrick_s[bucket]))
+	  && sgn(fp->oci) == sgn(c->databrick_s[bucket]) && fp->flow.dlocal)
 	{
 	  addSample(bucket, fp, key);
 	}
@@ -404,9 +406,8 @@ amonProcessing(flow_t flow, int len, long start, long end, int oci)
       return;
     }
   // Standardize time
-  curtime = start;
-  start = int(int(start / parms["interval"])*parms["interval"]);
-  end = int(int(end / parms["interval"])*parms["interval"]);
+  if (start > curtime)
+    curtime = start;
 
   flow_p fp={start, end, len, oci, flow};
       
@@ -705,28 +706,30 @@ void findBestSignature(int i, cell* c)
     {
       if (empty(samples.bins[i].flows[s].flow))
 	continue;
-      // Print out each signature for debugging
-      if (verbose)
-	cout<<"SIG: "<<i<<" candidate "<<printsignature(samples.bins[i].flows[s].flow)<<" v="<<samples.bins[i].flows[s].len<<" o="<<samples.bins[i].flows[s].oci<<" toto="<<totoci<<endl;
       // This signature covers more than the maximum, remember
       // this new maximum
-      if (abs(samples.bins[i].flows[s].oci) > abs(maxoci))
-	maxoci = samples.bins[i].flows[s].oci;
-      // Is it a more specific signature with also much
-      // more coverage
-      if (abs(samples.bins[i].flows[s].oci) > HMB*abs(oci) ||
-	  (HMB*abs(samples.bins[i].flows[s].oci) > abs(maxoci) && bettersig(samples.bins[i].flows[s].flow, bestsig)))
+      double candrate = (double)samples.bins[i].flows[s].oci/parms["attack_low"];
+      // Print out each signature for debugging
+      if (verbose)
+	cout<<"SIG: "<<i<<" candidate "<<printsignature(samples.bins[i].flows[s].flow)<<" v="<<samples.bins[i].flows[s].len<<" o="<<samples.bins[i].flows[s].oci<<" toto="<<totoci<<" candrate "<<candrate<<" divided "<<candrate/totoci<<endl;
+      // Potential candidate
+      if (candrate/totoci > FILTER_THRESH)
 	{
-	  bestsig = samples.bins[i].flows[s].flow;
-	  oci = samples.bins[i].flows[s].oci;
+	  // Is it a more specific signature with also much
+	  // more coverage
+	  if (bettersig(samples.bins[i].flows[s].flow, bestsig))
+	    {
+	      bestsig = samples.bins[i].flows[s].flow;
+	      oci = candrate;
+	    }
 	}
-    } 
+    }
   if (verbose)
     cout<<"SIG: "<<i<<" best sig "<<printsignature(bestsig)<<" Empty? "<<empty(bestsig)<<" oci "<<maxoci<<" out of "<<totoci<<endl;
   
   // Remember the signature if it is not empty and can filter
   // at least FILTER_THRESH flows in the sample
-  if (!empty(bestsig) && (float)oci/totoci > FILTER_THRESH)
+  if (!empty(bestsig))
     {
       if (verbose)
 	cout<<"ISIG: "<<i<<" installed sig "<<printsignature(bestsig)<<endl;
@@ -739,13 +742,17 @@ void findBestSignature(int i, cell* c)
 	  signatures[i].vol = 0;
 	  signatures[i].oci = 0;
 	}
-      
+      int diff = curtime - lasttime;
+      if (diff == 0)
+	diff = 1;
+      int rate = c->databrick_p[i]/diff;
+      int roci = c->databrick_s[i]/diff;
       // Write the start of the attack into alerts
       ofstream out;
       out.open("alerts.txt", std::ios_base::app);
       out<<i/BRICK_UNIT<<" "<<curtime<<" ";
-      out<<"START "<<i<<" "<< c->databrick_p[i];
-      out<<" "<<c->databrick_s[i]<<" ";
+      out<<"START "<<i<<" "<<rate;
+      out<<" "<<roci<<" ";
       out<<printsignature(bestsig)<<endl;
       out.close();
       // Now remove abnormal measure and samples, we're done
@@ -772,12 +779,13 @@ void detect_attack(cell* c)
   // If verbose, output debugging statistics into files
   if (verbose)
     {
-      stmt = con->prepareStatement ("INSERT INTO stats VALUES (?, ?)");
+      stmt = con->prepareStatement ("INSERT INTO stats VALUES (?, ?, ?)");
       DataBuf buffer((char*)c, sizeof(cell));
       istream stream(&buffer);
-      
-      stmt->setUInt(1, curtime);
-      stmt->setBlob(2, &stream);
+
+      stmt->setString(1, label);
+      stmt->setUInt(2, curtime);
+      stmt->setBlob(3, &stream);
       try{
 	stmt->executeUpdate();
 	cout<<"Executed one update"<<pthread_self()<<endl;
@@ -797,22 +805,6 @@ void detect_attack(cell* c)
       double avgs = stats[hist][avg][sym][i];
       double stds = sqrt(stats[hist][ss][sym][i]/(stats[hist][n][sym][i]-1));
 
-	  /*
-	  debug[i]<<curtime<<" "<<avgv<<" ";
-	  debug[i]<<stdv<<" "<<c->databrick_p[i]<<" ";
-	  debug[i]<<avgs<<" "<<stds<<" ";
-	  debug[i]<<c->databrick_s[i]<<" ";
-	  if (!empty(signatures[i].sig))
-	    {
-	      debug[i]<<signatures[i].vol<<"  ";
-	      debug[i]<<signatures[i].oci<<"  ";
-	    }
-	  else
-	    debug[i]<<"0 0 ";
-	  debug[i]<<is_attack[i]<<endl;
-	}
-	  */
-
       if (is_attack[i] == true)
 	is_attack[i] = false;
       // If both volume and asymmetry are abnormal and training has completed
@@ -825,12 +817,12 @@ void detect_attack(cell* c)
 	  if (verbose)
 	    cout<<" abnormal for "<<i<<" points "<<is_abnormal[i]<<" oci "<<c->databrick_s[i]<<" ranges " <<avgs<<"+-"<<stds<<", vol "<<c->databrick_p[i]<<" ranges " <<avgv<<"+-"<<stdv<<endl;
 	  
-	  // Increase abnormal score, but cap at attack_high/interval
-	  if (is_abnormal[i] < int(parms["attack_high"]/parms["interval"]))
-	      is_abnormal[i]++;
-
-	  // If abnormal score is above attack_low/interval
-	  if (is_abnormal[i] >= int(parms["attack_low"]/parms["interval"])
+	  // Increase abnormal score, but cap at attack_high
+	  if (is_abnormal[i] < int(parms["attack_high"]))
+	    is_abnormal[i]++;
+	  
+	  // If abnormal score is above attack_low
+	  if (is_abnormal[i] >= int(parms["attack_low"])
 	      && !is_attack[i])
 	    {
 	      // Signal attack detection 
@@ -944,6 +936,7 @@ void *reset_transmit (void* passed_parms)
   // Serialize access to cells
   pthread_mutex_lock (&cells_lock);
 
+  lasttime = curtime;
   // We will process this one now
   int current = cfront;
 
@@ -1055,7 +1048,6 @@ int main (int argc, char *argv[])
   char *file_in = NULL;
   char *startfile = NULL, *endfile = NULL;
   
-  
   while ((c = getopt (argc, argv, "hvlr:s:e:f")) != '?')
     {
       if ((c == 255) || (c == -1))
@@ -1069,6 +1061,7 @@ int main (int argc, char *argv[])
 	  break;
 	case 'r':
 	  file_in = strdup(optarg);
+	  label = file_in;
 	  break;
 	case 'f':
 	  sim_filter = true;
@@ -1095,15 +1088,6 @@ int main (int argc, char *argv[])
       exit(-1);
     }
   cout<<"Verbose "<<verbose<<endl;
-
-  // Prepare debug files
-  if (verbose)
-    for (int i = 0; i < BRICK_DIMENSION; i++)
-      {
-	sprintf(filename,"%d.debug", i);
-	debug[i].open(filename);
-	debug[i]<<"#timestamp mean_vol std_vol cur_vol mean_as std_as cur_as vol_fil as_fil attack\n";
-      }
 
   // Connect to DB
   try {
