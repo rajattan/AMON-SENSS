@@ -161,5 +161,6 @@ int loadservices(const char* fname);
 void loadprefixes(const char* fname);
 int isservice(int port);
 int islocal(u_int32_t ip);
+int zeros(flow_t f);
 
 #endif

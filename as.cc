@@ -99,6 +99,8 @@ struct cell
   int wfilter_s[BRICK_DIMENSION];	         // symmetry w filter 
   int fresh;
 };
+// Should we require destination prefix
+bool noorphan = false;
 // How many service ports are there
 int numservices = 0;
 // How many local prefixes are there
@@ -706,6 +708,13 @@ void findBestSignature(int i, cell* c)
     {
       if (empty(samples.bins[i].flows[s].flow))
 	continue;
+      if (noorphan)
+	{
+	  if (samples.bins[i].flows[s].flow.dst == 0 ||
+	      zeros(samples.bins[i].flows[s].flow) == 3)
+	    continue;
+	}
+
       // This signature covers more than the maximum, remember
       // this new maximum
       double candrate = (double)samples.bins[i].flows[s].oci/parms["attack_low"];
@@ -719,6 +728,8 @@ void findBestSignature(int i, cell* c)
 	  // more coverage
 	  if (bettersig(samples.bins[i].flows[s].flow, bestsig))
 	    {
+	      if (verbose)
+		cout<<"SIG: changing to "<< printsignature(samples.bins[i].flows[s].flow)<<endl;
 	      bestsig = samples.bins[i].flows[s].flow;
 	      oci = candrate;
 	    }
@@ -1034,11 +1045,12 @@ printHelp (void)
 
 // Main program
 int main (int argc, char *argv[])
-{
+{  
   delimiters = (int*)malloc(AR_LEN*sizeof(int));
   // Parse configuration
   parse_config (parms);
   // Load service port numbers
+  noorphan = (bool) parms["no_orphan"];
   numservices = loadservices("services.txt");
   cout<<"Services "<<numservices<<endl;
   loadprefixes("localprefs.txt");
