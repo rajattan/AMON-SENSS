@@ -6,6 +6,7 @@
 import time, sys, os
 
 signatures = []
+limit = 0
 
 class Signature:
     
@@ -15,6 +16,9 @@ class Signature:
         self.dst = None
         self.dport = None
         self.proto = None
+        self.rate = 0
+        ar = line.split()
+        self.rate = int(ar[4])
         for delim in ("src ip", "src port", "dst ip", "dst port", "proto"):
             i = line.find(delim)
             if (i > -1):
@@ -104,8 +108,8 @@ def processalert(line):
     items = line.split()
     oci = items[5]
     s = Signature(line)
-    print line
-    insertSignature(s)
+    if (s.rate >= limit):
+        insertSignature(s)
     for ss in signatures:
         print "Signature ",ss.printsig()
     print "\n\n\n\n\n\n";
@@ -113,5 +117,6 @@ def processalert(line):
 # Alert file is specified on the cmd line        
 if __name__ == '__main__':
     loglines = follow(sys.argv[1])
+    limit = int(sys.argv[2])
     for line in loglines:
         processalert(line)

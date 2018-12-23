@@ -798,8 +798,9 @@ void detect_attack(cell* c)
       stmt->setUInt(2, curtime);
       stmt->setBlob(3, &stream);
       try{
-	stmt->executeUpdate();
-	cout<<"Executed one update"<<pthread_self()<<endl;
+	sql::ResultSet *res = stmt->executeUpdate();
+	if (res)
+	  cout<<"Executed one update"<<pthread_self()<<endl;
       }
       catch(sql::SQLException &e) {
 	cout << " (MySQL error code: " << e.getErrorCode();
