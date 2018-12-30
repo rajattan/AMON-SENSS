@@ -11,6 +11,7 @@ limit = 0
 class Signature:
     
     def __init__(self, line):
+        self.time = None
         self.src = None
         self.sport = None
         self.dst = None
@@ -18,7 +19,9 @@ class Signature:
         self.proto = None
         self.rate = 0
         ar = line.split()
+        self.time = int(ar[1])
         self.rate = int(ar[4])
+        self.oci = int(ar[5])
         for delim in ("src ip", "src port", "dst ip", "dst port", "proto"):
             i = line.find(delim)
             if (i > -1):
@@ -53,7 +56,7 @@ class Signature:
 
 
     def printsig(self):
-        return "src ip ", self.src, " and src port ", self.sport, " and dst ip ", self.dst, " and dst port ", self.dport, " and proto ", self.proto
+        return self.time , " rate " , self.rate, " oci ", self.oci, " src ip ", self.src, " and src port ", self.sport, " and dst ip ", self.dst, " and dst port ", self.dport, " and proto ", self.proto
 
 def insertSignature(sig):
     siglist = signatures

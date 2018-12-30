@@ -131,6 +131,8 @@ ofstream debug[BRICK_DIMENSION];
 int is_abnormal[BRICK_DIMENSION];
 // Did we detect an attack in this bin
 int is_attack[BRICK_DIMENSION];
+// Should we allow broad signatures
+int broad_allowed[BRICK_DIMENSION];
 // Are we simulating filtering. This is not for live experiments.
 bool sim_filter = false;
 
@@ -139,8 +141,8 @@ bool training_done = false;
 int trained = 0;
 
 // Current time
-long curtime = 0;
-long lasttime = 0;
+double curtime = 0;
+double lasttime = 0;
 
 // Verbose bit
 int verbose = 0;
@@ -155,7 +157,7 @@ struct timespec last_entry;
 
 // Serialize access to statistics
 pthread_mutex_t cells_lock = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t flows_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t sql_lock = PTHREAD_MUTEX_INITIALIZER;
 
 // Types of statistics. If this changes, update the entire section 
 enum period{cur, hist};
@@ -170,7 +172,6 @@ map<string,double> parms;
 // Variables for DB access
 sql::Driver *driver;
 sql::Connection *con;
-sql::PreparedStatement *stmt;
 sql::ResultSet *res;
 
 
@@ -240,7 +241,8 @@ parse_config (map <string,double>& parms)
 	// exist
 	char name[MAXLINE], value[MAXLINE];
 	int found = -1;
-	for(int i=0; i<strlen(buff); i++)
+	int i = 0;
+	for(i=0; i<strlen(buff); i++)
 	  {
 	    if (buff[i] == '=')
 	      {
@@ -255,10 +257,16 @@ parse_config (map <string,double>& parms)
 		break;
 	      }
 	  }
+	if (i > 0 && found > -1)
+	  {
+	    strncpy(value,buff+found+1,i-found-1);
+	    value[i-found-1] = 0;
+	  }
 	if (found == -1)
 	  continue;
 	trim(name);
 	trim(value);
+	cout<<"Parm "<<name<<" val "<<value<<endl;
 	parms.insert(pair<string,double>(name,strtod(value,0)));
   }
   fclose (fp);
@@ -311,7 +319,7 @@ void addSample(int index, flow_p* f, flow_t* key)
 	  samples.bins[index].flows[s].len += abs(f->oci);
 	  samples.bins[index].flows[s].oci += f->oci;
 	}
-      else
+      else	
 	{
 	  // Boyer Moore to find signatures that cover the most flows
 	  if (empty(samples.bins[index].flows[s].flow))
@@ -399,7 +407,7 @@ bool shouldFilter(int bucket, flow_t flow)
 
 // Main function, which processes each flow
 void
-amonProcessing(flow_t flow, int len, long start, long end, int oci)
+amonProcessing(flow_t flow, int len, double start, double end, int oci)
 {
   // Detect if the flow is malformed and reject it
   if (malformed(start) || malformed(end))
@@ -470,18 +478,18 @@ amonProcessing(flow_t flow, int len, long start, long end, int oci)
 	    {
 	      if (flow.dlocal)
 		{
-		  if (isservice(flow.dport))
+		  if (isservice(flow.sport))
 		    {
-		      d_bucket = myhash(0, flow.dport, SERV);
+		      d_bucket = myhash(0, flow.sport, CLI);
 		      if (shouldFilter(d_bucket, flow))
 			{
 			  is_filtered = true;
 			  break;
 			}
 		    }
-		  else if (isservice(flow.sport))
+		  else if (isservice(flow.dport))
 		    {
-		      d_bucket = myhash(0, flow.sport, CLI);
+		      d_bucket = myhash(0, flow.dport, SERV);
 		      if (shouldFilter(d_bucket, flow))
 			{
 			  is_filtered = true;
@@ -500,18 +508,18 @@ amonProcessing(flow_t flow, int len, long start, long end, int oci)
 		}
 	      if (flow.slocal)
 		{
-		  if (isservice(flow.sport))
+		  if (isservice(flow.dport))
 		    {
-		      s_bucket = myhash(0, flow.sport, SERV);
+		      s_bucket = myhash(0, flow.dport, CLI);
 		      if (shouldFilter(s_bucket, flow))
 			{
 			  is_filtered = true;
 			  break;
 			}
 		    }
-		  else if (isservice(flow.dport))
+		  else if (isservice(flow.sport))
 		    {
-		      s_bucket = myhash(0, flow.dport, CLI);
+		      s_bucket = myhash(0, flow.sport, SERV);
 		      if (shouldFilter(s_bucket, flow))
 			{
 			  is_filtered = true;
@@ -570,13 +578,13 @@ amonProcessing(flow_t flow, int len, long start, long end, int oci)
 	{
 	  if (flow.dlocal)
 	    {
-	      if (isservice(flow.dport))
-		{
-		  d_bucket = myhash(0, flow.dport, SERV);
-		}
-	      else if (isservice(flow.sport))
+	      if (isservice(flow.sport))
 		{
 		  d_bucket = myhash(0, flow.sport, CLI);
+		}
+	      else if (isservice(flow.dport))
+		{
+		  d_bucket = myhash(0, flow.dport, SERV);
 		}
 	      else
 		{
@@ -722,10 +730,9 @@ void findBestSignature(int i, cell* c)
       if (verbose)
 	cout<<"SIG: "<<i<<" candidate "<<printsignature(samples.bins[i].flows[s].flow)<<" v="<<samples.bins[i].flows[s].len<<" o="<<samples.bins[i].flows[s].oci<<" toto="<<totoci<<" candrate "<<candrate<<" divided "<<candrate/totoci<<endl;
       // Potential candidate
-      if (candrate/totoci > FILTER_THRESH)
+      if (candrate/totoci > parms["filter_thresh"]*broad_allowed[i])
 	{
-	  // Is it a more specific signature with also much
-	  // more coverage
+	  // Is it a more specific signature?
 	  if (bettersig(samples.bins[i].flows[s].flow, bestsig))
 	    {
 	      if (verbose)
@@ -739,9 +746,10 @@ void findBestSignature(int i, cell* c)
     cout<<"SIG: "<<i<<" best sig "<<printsignature(bestsig)<<" Empty? "<<empty(bestsig)<<" oci "<<maxoci<<" out of "<<totoci<<endl;
   
   // Remember the signature if it is not empty and can filter
-  // at least FILTER_THRESH flows in the sample
+  // at least filter_thresh flows in the sample
   if (!empty(bestsig))
     {
+      broad_allowed[i]++;
       if (verbose)
 	cout<<"ISIG: "<<i<<" installed sig "<<printsignature(bestsig)<<endl;
 
@@ -753,7 +761,7 @@ void findBestSignature(int i, cell* c)
 	  signatures[i].vol = 0;
 	  signatures[i].oci = 0;
 	}
-      int diff = curtime - lasttime;
+      double diff = curtime - lasttime;
       if (diff == 0)
 	diff = 1;
       int rate = c->databrick_p[i]/diff;
@@ -761,7 +769,7 @@ void findBestSignature(int i, cell* c)
       // Write the start of the attack into alerts
       ofstream out;
       out.open("alerts.txt", std::ios_base::app);
-      out<<i/BRICK_UNIT<<" "<<curtime<<" ";
+      out<<i/BRICK_UNIT<<" "<<(long)curtime<<" ";
       out<<"START "<<i<<" "<<rate;
       out<<" "<<roci<<" ";
       out<<printsignature(bestsig)<<endl;
@@ -770,6 +778,9 @@ void findBestSignature(int i, cell* c)
       is_abnormal[i] = 0;
       // Clear samples
       clearSamples(i);
+      // Clear broad_allowed if we did get a broad sig
+      if (broad_allowed[i] >= 16)
+	broad_allowed[i] = 0;
     }
   // Did not find a good signature
   // drop the attack signal and try again later
@@ -779,7 +790,7 @@ void findBestSignature(int i, cell* c)
 	cout << "AT: Did not find good signature for attack "<<
 	  " on bin "<<i<<" best sig "<<empty(bestsig)<<
 	  " coverage "<<(float)oci/totoci<<" thresh "<<
-	  FILTER_THRESH<<endl;
+	  parms["filter_thresh"]<<endl;
       is_attack[i] = false;
     }
 }
@@ -790,23 +801,46 @@ void detect_attack(cell* c)
   // If verbose, output debugging statistics into files
   if (verbose)
     {
-      stmt = con->prepareStatement ("INSERT INTO stats VALUES (?, ?, ?)");
+      sql::PreparedStatement *stmt;
       DataBuf buffer((char*)c, sizeof(cell));
       istream stream(&buffer);
-
-      stmt->setString(1, label);
-      stmt->setUInt(2, curtime);
-      stmt->setBlob(3, &stream);
-      try{
-	sql::ResultSet *res = stmt->executeUpdate();
-	if (res)
-	  cout<<"Executed one update"<<pthread_self()<<endl;
-      }
-      catch(sql::SQLException &e) {
-	cout << " (MySQL error code: " << e.getErrorCode();
-	cout << ", SQLState: " << e.getSQLState() << " )" << endl;
-      }
+      pthread_mutex_lock (&sql_lock);
+      bool succ = false;
+      while (!succ)
+	{
+	  try{
+	    stmt = con->prepareStatement ("INSERT INTO stats VALUES (?, ?, ?)");
+	    
+	    stmt->setString(1, label);
+	    stmt->setUInt(2, curtime);
+	    stmt->setBlob(3, &stream);
+	    succ = true;
+	  }
+	  catch(std::exception &e) {
+	    cout << "Exception conn is "<<con<<" error "<<e.what()<<endl;
+	    driver = get_driver_instance();
+	    con = driver->connect("tcp://127.0.0.1:3306", "amon-senss", "St33llab@isi");
+	    con->setSchema("AMONSENSS");
+	  }
+	}
+      succ = false;
+      while (!succ)
+	{
+	  try{
+	    int res = stmt->executeUpdate();
+	    if (res)
+	      {
+		cout<<"Executed one update"<<pthread_self()<<endl;
+		succ = true;
+	      }	    
+	  }
+	  catch(sql::SQLException &e) {
+	    cout << " (MySQL error code: " << e.getErrorCode();
+	    cout << ", SQLState: " << e.getSQLState() << " )" << endl;
+	  }
+	}
       delete stmt;
+      pthread_mutex_unlock (&sql_lock);
     }
   // For each bin
   for (int i=0;i<BRICK_DIMENSION;i++)
@@ -826,21 +860,28 @@ void detect_attack(cell* c)
       int asym = c->databrick_s[i];
       if (training_done && abnormal(vol, i, c) && abnormal(sym, i, c))
 	{
+	  double aavgs = abs(avgs);
+	  if (aavgs == 0)
+	    aavgs = 1;
+	  double d = abs(abs(asym) - abs(avgs) - parms["numstd"]*abs(stds))/aavgs;
 	  if (verbose)
-	    cout<<" abnormal for "<<i<<" points "<<is_abnormal[i]<<" oci "<<c->databrick_s[i]<<" ranges " <<avgs<<"+-"<<stds<<", vol "<<c->databrick_p[i]<<" ranges " <<avgv<<"+-"<<stdv<<endl;
+	    cout<<" abnormal for "<<i<<" points "<<is_abnormal[i]<<" oci "<<c->databrick_s[i]<<" ranges " <<avgs<<"+-"<<stds<<", vol "<<c->databrick_p[i]<<" ranges " <<avgv<<"+-"<<stdv<<" over mean "<<d<<endl;
 	  
 	  // Increase abnormal score, but cap at attack_high
 	  if (is_abnormal[i] < int(parms["attack_high"]))
-	    is_abnormal[i]++;
+	    is_abnormal[i] += int(d);
+	  if (is_abnormal[i] > int(parms["attack_high"]))
+	    is_abnormal[i] = int(parms["attack_high"]);
 	  
 	  // If abnormal score is above attack_low
+	  // and oci is above MAX_OCI
 	  if (is_abnormal[i] >= int(parms["attack_low"])
-	      && !is_attack[i])
+	      && !is_attack[i] && abs(c->databrick_s[i]) >= int(parms["max_oci"]))
 	    {
 	      // Signal attack detection 
 	      is_attack[i] = true;
 	      if (verbose)
-		cout<<"AT: Attack detected on "<<i<<" but not reported yet "<<endl;
+		cout<<"AT: Attack detected on "<<i<<" but not reported yet vol "<<c->databrick_p[i]<<" oci "<<c->databrick_s[i]<<" max oci "<<int(parms["max_oci"])<<endl;
 	     
 	      // Find the best signature
 	      findBestSignature(i, c);
@@ -867,9 +908,11 @@ amonProcessingNfdump (char* line, long time)
   char* tokene;
   char saveline[MAXLINE];
   parse(line,'|', &delimiters);
-  long start = strtol(line+delimiters[0], &tokene, 10);
-  long end = strtol(line+delimiters[2], &tokene, 10);
-  int dur = end - start;
+  double start = (double)strtol(line+delimiters[0], &tokene, 10);
+  start = start + strtol(line+delimiters[1], &tokene, 10)/1000.0;
+  double end = (double)strtol(line+delimiters[2], &tokene, 10);
+  end = end + strtol(line+delimiters[3], &tokene, 10)/1000.0;
+  double dur = end - start;
   // Normalize duration
   if (dur < 0)
     dur = 0;
@@ -969,7 +1012,9 @@ void *reset_transmit (void* passed_parms)
   update_stats(c);
   if (training_done)
     detect_attack(c);
-  cout<<"Done "<<time(0)<<endl;
+  std::cout.precision(5);
+
+  cout<<std::fixed<<"Done "<<time(0)<<" curtime "<<curtime<<endl;
   // Detect attack here
   pthread_exit (NULL);
 }
@@ -1048,6 +1093,8 @@ printHelp (void)
 int main (int argc, char *argv[])
 {  
   delimiters = (int*)malloc(AR_LEN*sizeof(int));
+  memset(is_attack, 0, BRICK_DIMENSION*sizeof(int));
+  memset(is_abnormal, 0, BRICK_DIMENSION*sizeof(int));
   // Parse configuration
   parse_config (parms);
   // Load service port numbers
@@ -1240,7 +1287,7 @@ int main (int argc, char *argv[])
 		start = time(0);
 	      }
 	    processedflows++;
-	    if (processedflows == MAX_FLOWS)
+	    if (processedflows == (int)parms["max_flows"])
 	      {
 		pthread_mutex_lock (&cells_lock);
 		// This one we will work on next

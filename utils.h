@@ -36,7 +36,6 @@ enum ways{FOR, LOC, LOCPREF, SERV, CLI};
 #define BRICK_UNIT 701           // How many bins we have. This should NOT be a power of 2
 #define BRICK_DIMENSION NUMF*BRICK_UNIT // There are NUMF variants of how we can bin the traffic (e.g., by port, by dst IP, etc.)
 #define REPORT_THRESH 30
-#define MAX_FLOWS 1000000          // Each MAX_FLOWS we run attack detection
 #define MIN_FRESH 10              // have seen most of their records
 #define HMB 1.1                   // This is how much more a less specific signature should catch to be accepted
 #define MAXLINE 255               // Maximum length for reading strings
@@ -45,7 +44,6 @@ enum ways{FOR, LOC, LOCPREF, SERV, CLI};
 #define NF 16                     // Number of different signatures for a flow
 #define QSIZE 100                 // How many timestamps can I accumulate before processing
 
-#define FILTER_THRESH 0.5         // A signature must explain this much of asymmetry
 #define SIG_FLOWS 100             // This many flows must be collected, at least, to evaluate a signature
 #define MIN_SAMPLES 0.5           // We must have samples for at least this fraction of training period to
                                   // roll over current stats into historical stats
