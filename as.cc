@@ -716,10 +716,11 @@ void findBestSignature(int i, cell* c)
     {
       if (empty(samples.bins[i].flows[s].flow))
 	continue;
-      if (noorphan)
+      if (noorphan && broad_allowed[i] < 3)
 	{
 	  if (samples.bins[i].flows[s].flow.dst == 0 ||
 	      zeros(samples.bins[i].flows[s].flow) == 3)
+	    cout<<"rejecting sig "<<printsignature(samples.bins[i].flows[s].flow)<<" under noorphan and broad_allowed "<<broad_allowed[i]<<endl;
 	    continue;
 	}
 
@@ -744,12 +745,11 @@ void findBestSignature(int i, cell* c)
     }
   if (verbose)
     cout<<"SIG: "<<i<<" best sig "<<printsignature(bestsig)<<" Empty? "<<empty(bestsig)<<" oci "<<maxoci<<" out of "<<totoci<<endl;
-  
+  broad_allowed[i]++;
   // Remember the signature if it is not empty and can filter
   // at least filter_thresh flows in the sample
   if (!empty(bestsig))
     {
-      broad_allowed[i]++;
       if (verbose)
 	cout<<"ISIG: "<<i<<" installed sig "<<printsignature(bestsig)<<endl;
 
@@ -864,6 +864,8 @@ void detect_attack(cell* c)
 	  if (aavgs == 0)
 	    aavgs = 1;
 	  double d = abs(abs(asym) - abs(avgs) - parms["numstd"]*abs(stds))/aavgs;
+	  if (d > parms["max_oci"])
+	    d = parms["max_oci"];
 	  if (verbose)
 	    cout<<" abnormal for "<<i<<" points "<<is_abnormal[i]<<" oci "<<c->databrick_s[i]<<" ranges " <<avgs<<"+-"<<stds<<", vol "<<c->databrick_p[i]<<" ranges " <<avgv<<"+-"<<stdv<<" over mean "<<d<<endl;
 	  
