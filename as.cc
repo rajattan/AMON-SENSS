@@ -284,7 +284,7 @@ int empty(flow_t sig)
 
 void clearSamples(int index)
 {
-  flow_t key={0,0,0,0,0};
+  flow_t key;
   for (int s=1; s<NF; s++)
     {
       samples.bins[index].flows[s].flow = key;
@@ -419,7 +419,7 @@ amonProcessing(flow_t flow, int len, double start, double end, int oci)
   if (start > curtime)
     curtime = start;
 
-  flow_p fp={start, end, len, oci, flow};
+  flow_p fp(start, end, len, oci, flow);
       
   int d_bucket = -1, s_bucket = -1;	    // indices for the databrick 
 
@@ -544,7 +544,7 @@ amonProcessing(flow_t flow, int len, double start, double end, int oci)
 
   for (int way = FOR; way < CLI; way++) // SERV is included in CLI
     {
-      flow_t key = {0, 0, 0, 0, 0};
+      flow_t key;
       // Find buckets on which to work
       if (way == FOR)
 	{
@@ -706,7 +706,7 @@ void update_stats(cell* c)
 
 void findBestSignature(int i, cell* c)
 {
-  flow_t bestsig = {0,0,0,0,0};
+  flow_t bestsig;
   int oci = 0;
   int maxoci = 0;
   int totoci = c->databrick_s[i];
@@ -924,7 +924,7 @@ amonProcessingNfdump (char* line, long time)
 
   // JMM: 100 s up to here
   // Get source and destination IP and port and protocol 
-  flow_t flow = {0,0,0,0,0,0};
+  flow_t flow;
   int proto = atoi(line+delimiters[4]);
   flow.src = strtol(line+delimiters[8], &tokene, 10);
   flow.sport = atoi(line+delimiters[9]); 

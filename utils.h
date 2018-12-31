@@ -61,14 +61,27 @@ class DataBuf : public streambuf
 };
 
 // 5-tuple for the flow
-struct flow_t{
-  unsigned int src = 0;
-  unsigned short sport = 0;
-  unsigned int dst = 0;
-  unsigned short dport = 0;
-  unsigned char proto = 0;
-  int slocal = 0;
-  int dlocal = 0;
+class flow_t{
+
+ public:
+  unsigned int src;
+  unsigned short sport;
+  unsigned int dst;
+  unsigned short dport;
+  unsigned char proto;
+  int slocal;
+  int dlocal;
+  
+  flow_t()
+    {
+      src = 0;
+      sport = 0;
+      dst = 0;
+      dport = 0;
+      proto = 0;
+      slocal = 0;
+      dlocal = 0;
+    }
   
   bool operator<(const flow_t& rhs) const
   {
@@ -103,13 +116,31 @@ struct flow_t{
 };
 
 // This wraps a flow and keeps some statistics
-struct flow_p
+class flow_p
 {
-  long start = 0;
-  long end = 0;
-  int len = 0;
-  int oci = 0;
+ public:
+  long start;
+  long end;
+  int len;
+  int oci;
   flow_t flow;
+
+  flow_p()
+    {
+      start = 0;
+      end = 0;
+      len = 0;
+      oci = 0;
+    }
+
+  flow_p(long start, long end, int len, int oci, flow_t flow)
+    {
+      this->start = start;
+      this->end = end;
+      this->len = len;
+      this->oci = oci;
+      this->flow = flow;
+    }
 };
 
 // This holds all the flows for a given time interval. 
