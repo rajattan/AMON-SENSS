@@ -540,7 +540,14 @@ amonProcessing(flow_t flow, int len, double start, double end, int oci)
 	}
     }
   if (is_filtered)
-    return;
+    {
+      if (d_bucket != -1)
+	{
+	  c->wfilter_p[d_bucket] += len;
+	  c->wfilter_s[d_bucket] += oci;
+	}
+      return;
+    }
 
   for (int way = FOR; way < CLI; way++) // SERV is included in CLI
     {
@@ -720,7 +727,6 @@ void findBestSignature(int i, cell* c)
 	{
 	  if (samples.bins[i].flows[s].flow.dst == 0 ||
 	      zeros(samples.bins[i].flows[s].flow) == 3)
-	    cout<<"rejecting sig "<<printsignature(samples.bins[i].flows[s].flow)<<" under noorphan and broad_allowed "<<broad_allowed[i]<<endl;
 	    continue;
 	}
 
@@ -731,7 +737,7 @@ void findBestSignature(int i, cell* c)
       if (verbose)
 	cout<<"SIG: "<<i<<" candidate "<<printsignature(samples.bins[i].flows[s].flow)<<" v="<<samples.bins[i].flows[s].len<<" o="<<samples.bins[i].flows[s].oci<<" toto="<<totoci<<" candrate "<<candrate<<" divided "<<candrate/totoci<<endl;
       // Potential candidate
-      if (candrate/totoci > parms["filter_thresh"]*broad_allowed[i])
+      if (candrate/totoci > parms["filter_thresh"]*(broad_allowed[i]+1))
 	{
 	  // Is it a more specific signature?
 	  if (bettersig(samples.bins[i].flows[s].flow, bestsig))
