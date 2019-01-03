@@ -31,7 +31,7 @@
 using namespace std;
 
 #define NUMF 5                    // How many ways do we bin the traffic
-enum ways{FOR, LOC, LOCPREF, SERV, CLI};
+enum ways{FOR, LOC, LOCPREF, FPORT, LPORT};
 
 #define BRICK_UNIT 701           // How many bins we have. This should NOT be a power of 2
 #define BRICK_DIMENSION NUMF*BRICK_UNIT // There are NUMF variants of how we can bin the traffic (e.g., by port, by dst IP, etc.)

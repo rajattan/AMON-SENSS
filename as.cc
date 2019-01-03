@@ -93,7 +93,7 @@ void parse(char* input, char delimiter, int** array)
 // Variables/structs needed for detection
 struct cell
 {
-  unsigned int databrick_p[BRICK_DIMENSION];	 // databrick volume
+  int databrick_p[BRICK_DIMENSION];	         // databrick volume
   int databrick_s[BRICK_DIMENSION];	         // databrick symmetry 
   unsigned int wfilter_p[BRICK_DIMENSION];	 // volume w filter 
   int wfilter_s[BRICK_DIMENSION];	         // symmetry w filter 
@@ -274,11 +274,34 @@ parse_config (map <string,double>& parms)
 
 
 // Check if the signature contains all zeros
+// proto doesn't count
 int empty(flow_t sig)
 {
   return ((sig.src == 0) && (sig.sport == 0) &&
-	  (sig.dst == 0) && (sig.dport == 0) &&
-	  (sig.proto == 0));
+	  (sig.dst == 0) && (sig.dport == 0));
+}
+
+// Check if the signature is subset or matches
+// exactly the slot where anomaly was found.
+// For example, if a source port's traffic was
+// anomalous we have to have that source port in the
+// signature
+bool compliantsig(int i, flow_t sig)
+{
+  switch (i/BRICK_UNIT)
+    {
+    case 0:
+      return (sig.src != 0);
+    case 1:
+    case 2:
+      return (sig.dst != 0 && (sig.src != 0 || sig.dport != 0 || sig.sport != 0));
+    case 3:
+      return (sig.sport != 0 && (sig.dst != 0 || sig.dport != 0 || sig.sport != 0));
+    case 4:
+      return (sig.dport != 0 && (sig.dst != 0 || sig.src != 0 || sig.sport != 0));
+    default:
+      return false;
+    }
 }
 
 
@@ -293,13 +316,13 @@ void clearSamples(int index)
     }
 }
 // Add a flow to the samples bin
-void addSample(int index, flow_p* f, flow_t* key)
+void addSample(int index, flow_p* f, int way)
 {
   // Create some partial signatures for this flow, like src-dst combination,
   // src-sport, etc. Don't allow just protocol
   for (int s=1; s<NF; s++)
     {
-      flow_t k = *key;
+      flow_t k;
       k.proto = f->flow.proto;
       if ((s & 8) > 0)
 	k.src = f->flow.src;
@@ -309,6 +332,19 @@ void addSample(int index, flow_p* f, flow_t* key)
 	k.dst = f->flow.dst;
       if ((s & 1) > 0)
 	k.dport = f->flow.dport;
+      if (way == FOR)
+	k.src = f->flow.src;
+      else if (way == LOC || way == LOCPREF)
+	{
+	  k.dst = f->flow.dst;
+	  if (way == LOCPREF)
+	    k.dst &= 0xffffff00;
+	}
+      else if (way == FPORT)
+	k.sport = f->flow.sport;
+      else if (way == LPORT)
+	k.dport = f->flow.dport;
+
       // src, dst, sport, dport
       // Overload len so we can track frequency of contributions
       // Jelena - there was continue here
@@ -367,35 +403,6 @@ int malformed(long timestamp)
 }
 
 
-void
-addSamples(int s_bucket, int d_bucket, flow_p* fp, cell* c, flow_t* key)
-{
-  // If we've not yet signaled an attack but the flow's oci is of the
-  // same sign as the stats for its bin, collect this flow in samples
-  // for possible signature later
-  int bucket = s_bucket;
-  for (int i=0; i<2; i++)
-    {
-      if (bucket == -1)
-	{
-	  if (bucket == s_bucket)
-	    {
-	      bucket = d_bucket;
-	      continue;
-	    }
-	  else
-	    return;
-	}
-
-      if (!is_attack[bucket] && training_done && fp->oci != 0
-	  && sgn(fp->oci) == sgn(c->databrick_s[bucket]) && fp->flow.dlocal)
-	{
-	  addSample(bucket, fp, key);
-	}
-      if (bucket == s_bucket)
-	bucket = d_bucket;
-    }
-}
 
 bool shouldFilter(int bucket, flow_t flow)
 {
@@ -429,7 +436,7 @@ amonProcessing(flow_t flow, int len, double start, double end, int oci)
 
   if (sim_filter)
     {
-      for (int way = FOR; way < CLI; way++) // SERV is included in CLI
+      for (int way = FOR; way <= LPORT; way++) // SERV is included in CLI
 	{
 	  // Find buckets on which to work
 	  if (way == FOR)
@@ -440,15 +447,8 @@ amonProcessing(flow_t flow, int len, double start, double end, int oci)
 		  if (shouldFilter(s_bucket, flow))
 		    {
 		      is_filtered = true;
-		      break;
-		    }
-		}
-	      if (flow.slocal)
-		{
-		  d_bucket = myhash(flow.dst, 0, FOR);
-		  if (shouldFilter(d_bucket, flow))
-		    {
-		      is_filtered = true;
+		      c->wfilter_p[s_bucket] += len;
+		      c->wfilter_s[s_bucket] += oci;
 		      break;
 		    }
 		}
@@ -461,163 +461,125 @@ amonProcessing(flow_t flow, int len, double start, double end, int oci)
 		  if (shouldFilter(d_bucket, flow))
 		    {
 		      is_filtered = true;
+		      c->wfilter_p[d_bucket] += len;
+		      c->wfilter_s[d_bucket] += oci;
 		      break;
 		    }
 		}
-	      if (flow.slocal)
-		{
-		  s_bucket = myhash(flow.src, 0, way);
-		  if (shouldFilter(s_bucket, flow))
-		    {
-		      is_filtered = true;
-		      break;
-		    }
-		}	      
 	    }
-	  else if (way == SERV) // CLI is included in SERV
+	  else if (way == FPORT) 
 	    {
 	      if (flow.dlocal)
 		{
-		  if (isservice(flow.sport))
+		  // traffic from FPORT
+		  s_bucket = myhash(0, flow.sport, way);
+		  if (shouldFilter(s_bucket, flow))
 		    {
-		      d_bucket = myhash(0, flow.sport, CLI);
-		      if (shouldFilter(d_bucket, flow))
-			{
-			  is_filtered = true;
-			  break;
-			}
-		    }
-		  else if (isservice(flow.dport))
-		    {
-		      d_bucket = myhash(0, flow.dport, SERV);
-		      if (shouldFilter(d_bucket, flow))
-			{
-			  is_filtered = true;
-			  break;
-			}
-		    }
-		  else
-		    {
-		      d_bucket = myhash(0, 0, CLI);
-		       if (shouldFilter(d_bucket, flow))
-			{
-			  is_filtered = true;
-			  break;
-			}
+		      is_filtered = true;
+		      c->wfilter_p[s_bucket] += len;
+		      c->wfilter_s[s_bucket] += oci;
+		      break;
 		    }
 		}
-	      if (flow.slocal)
+	    }
+	  else if (way == LPORT)
+	    {
+	      if (flow.dlocal)
 		{
-		  if (isservice(flow.dport))
+		  // traffic to LPORT
+		  d_bucket = myhash(0, flow.dport, way);
+		  if (shouldFilter(d_bucket, flow))
 		    {
-		      s_bucket = myhash(0, flow.dport, CLI);
-		      if (shouldFilter(s_bucket, flow))
-			{
-			  is_filtered = true;
-			  break;
-			}
-		    }
-		  else if (isservice(flow.sport))
-		    {
-		      s_bucket = myhash(0, flow.sport, SERV);
-		      if (shouldFilter(s_bucket, flow))
-			{
-			  is_filtered = true;
-			  break;
-			}
-		    }
-		  else
-		    {
-		      s_bucket = myhash(0, 0, CLI);
-		      if (shouldFilter(s_bucket, flow))
-			{
-			  is_filtered = true;
-			  break;
-			}
+		      is_filtered = true;
+		      c->wfilter_p[d_bucket] += len;
+		      c->wfilter_s[d_bucket] += oci;
+		      break;
 		    }
 		}
 	    }
 	}
     }
+
   if (is_filtered)
     {
-      if (d_bucket != -1)
-	{
-	  c->wfilter_p[d_bucket] += len;
-	  c->wfilter_s[d_bucket] += oci;
-	}
       return;
     }
 
-  for (int way = FOR; way < CLI; way++) // SERV is included in CLI
+  for (int way = FOR; way <= LPORT; way++) 
     {
-      flow_t key;
       // Find buckets on which to work
       if (way == FOR)
 	{
 	  if (flow.dlocal)
 	    {
+	      // traffic to us from FOR
 	      s_bucket = myhash(flow.src, 0, FOR);
 	      c->databrick_p[s_bucket] += len;
 	      c->databrick_s[s_bucket] += oci;
+	      addSample(s_bucket, &fp, way);
 	    }
 	  if (flow.slocal)
 	    {
+	      // our traffic to FOR
 	      d_bucket = myhash(flow.dst, 0, FOR);
-	      c->databrick_s[d_bucket] += oci;
+	      c->databrick_p[d_bucket] -= len;
+	      c->databrick_s[d_bucket] -= oci;
 	    }
 	}
       else if (way == LOC || way == LOCPREF)
 	{
 	  if (flow.dlocal)
 	    {
+	      // traffic to LOC
 	      d_bucket = myhash(flow.dst, 0, way);
 	      c->databrick_p[d_bucket] += len;
 	      c->databrick_s[d_bucket] += oci;
+	      addSample(d_bucket, &fp, way);
 	    }
 	  if (flow.slocal)
 	    {
+	      // traffic from LOC
 	      s_bucket = myhash(flow.src, 0, way);
-	      c->databrick_s[s_bucket] += oci;
+	      c->databrick_p[s_bucket] -= len;
+	      c->databrick_s[s_bucket] -= oci;
 	    }	      
 	}
-      else if (way == SERV) // CLI is included in SERV
+      else if (way == FPORT)
 	{
 	  if (flow.dlocal)
 	    {
-	      if (isservice(flow.sport))
-		{
-		  d_bucket = myhash(0, flow.sport, CLI);
-		}
-	      else if (isservice(flow.dport))
-		{
-		  d_bucket = myhash(0, flow.dport, SERV);
-		}
-	      else
-		{
-		  d_bucket = myhash(0, 0, CLI);
-		}
+	      // traffic from FPORT
+	      s_bucket = myhash(0, flow.sport, way);
+	      c->databrick_p[s_bucket] += len;
+	      c->databrick_s[s_bucket] += oci;
+	      addSample(s_bucket, &fp, way);
 	    }
 	  if (flow.slocal)
 	    {
-	      if (isservice(flow.sport))
-		{
-		  s_bucket = myhash(0, flow.sport, SERV);
-		}
-	      else if (isservice(flow.dport))
-		{
-		  s_bucket = myhash(0, flow.dport, CLI);
-		}
-	      else
-		{
-		  s_bucket = myhash(0, 0, CLI);
-		}
+	      // traffic to FPORT
+	      d_bucket = myhash(0, flow.dport, way);
+	      c->databrick_p[d_bucket] -= len;
+	      c->databrick_s[d_bucket] -= oci;	      
 	    }
-	  c->databrick_p[d_bucket] += len;
-	  c->databrick_s[d_bucket] += oci;
-	  c->databrick_s[s_bucket] += oci;	 
 	}
-      addSamples(s_bucket, d_bucket, &fp, c, &key);
+      else if (way == LPORT)
+	{
+	  if (flow.dlocal)
+	    {
+	      // traffic to LPORT
+	      d_bucket = myhash(0, flow.dport, way);
+	      c->databrick_p[d_bucket] += len;
+	      c->databrick_s[d_bucket] += oci;
+	      addSample(d_bucket, &fp, way);
+	    }
+	  if (flow.slocal)
+	    {
+	      // traffic from LPORT
+	      s_bucket = myhash(0, flow.sport, way);
+	      c->databrick_p[s_bucket] -= len;
+	      c->databrick_s[s_bucket] -= oci;
+	    }
+	}
     }
 }
 
@@ -635,14 +597,7 @@ int abnormal(int type, int index, cell* c)
   else
     data = c->databrick_s[index];
   // Volume larger than mean + numstd*stdev is abnormal 
-  if (type == vol && data > mean + parms["numstd"]*std)
-    {
-      return 1;
-    }
-  // Symmetry larger than mean + numstd*stdev or
-  // smaller than mean - numstd*stdev is abnormal 
-  else if (type == sym && ((data > mean + parms["numstd"]*std) ||
-			   (data < mean - parms["numstd"]*std)))
+  if (data > mean + parms["numstd"]*std)
     {
       return 1;
     }
@@ -723,21 +678,21 @@ void findBestSignature(int i, cell* c)
     {
       if (empty(samples.bins[i].flows[s].flow))
 	continue;
-      if (noorphan && broad_allowed[i] < 3)
+
+      double candrate = (double)samples.bins[i].flows[s].oci/parms["attack_low"];
+
+      if (!compliantsig(i, samples.bins[i].flows[s].flow))
 	{
-	  if (samples.bins[i].flows[s].flow.dst == 0 ||
-	      zeros(samples.bins[i].flows[s].flow) == 3)
+	  if (verbose)
+	    cout<<"non compliant SIG: "<<i<<" for slot "<<i/BRICK_UNIT<<" candidate "<<printsignature(samples.bins[i].flows[s].flow)<<" v="<<samples.bins[i].flows[s].len<<" o="<<samples.bins[i].flows[s].oci<<" toto="<<totoci<<" candrate "<<candrate<<" divided "<<candrate/totoci<<endl;
 	    continue;
 	}
 
-      // This signature covers more than the maximum, remember
-      // this new maximum
-      double candrate = (double)samples.bins[i].flows[s].oci/parms["attack_low"];
       // Print out each signature for debugging
       if (verbose)
 	cout<<"SIG: "<<i<<" candidate "<<printsignature(samples.bins[i].flows[s].flow)<<" v="<<samples.bins[i].flows[s].len<<" o="<<samples.bins[i].flows[s].oci<<" toto="<<totoci<<" candrate "<<candrate<<" divided "<<candrate/totoci<<endl;
       // Potential candidate
-      if (candrate/totoci > parms["filter_thresh"]*(broad_allowed[i]+1))
+      if (candrate/totoci > parms["filter_thresh"])
 	{
 	  // Is it a more specific signature?
 	  if (bettersig(samples.bins[i].flows[s].flow, bestsig))
@@ -873,11 +828,11 @@ void detect_attack(cell* c)
 	  if (d > parms["max_oci"])
 	    d = parms["max_oci"];
 	  if (verbose)
-	    cout<<" abnormal for "<<i<<" points "<<is_abnormal[i]<<" oci "<<c->databrick_s[i]<<" ranges " <<avgs<<"+-"<<stds<<", vol "<<c->databrick_p[i]<<" ranges " <<avgv<<"+-"<<stdv<<" over mean "<<d<<endl;
+	    cout<<curtime<<" abnormal for "<<i<<" points "<<is_abnormal[i]<<" oci "<<c->databrick_s[i]<<" ranges " <<avgs<<"+-"<<stds<<", vol "<<c->databrick_p[i]<<" ranges " <<avgv<<"+-"<<stdv<<" over mean "<<d<<endl;
 	  
 	  // Increase abnormal score, but cap at attack_high
 	  if (is_abnormal[i] < int(parms["attack_high"]))
-	    is_abnormal[i] += int(d);
+	    is_abnormal[i] += int(d+1);
 	  if (is_abnormal[i] > int(parms["attack_high"]))
 	    is_abnormal[i] = int(parms["attack_high"]);
 	  
@@ -898,6 +853,8 @@ void detect_attack(cell* c)
       // Training is completed and both volume and symmetry are normal
       else if (training_done && !abnormal(vol, i, c) && !abnormal(sym, i, c))
 	{
+	  // if (verbose)
+	  //cout<<curtime<<" is normal for "<<i<<" points "<<is_abnormal[i]<<" oci "<<c->databrick_s[i]<<" ranges " <<avgs<<"+-"<<stds<<", vol "<<c->databrick_p[i]<<" ranges " <<avgv<<"+-"<<stdv<<endl;
 	  // Reduce abnormal score
 	  if (is_abnormal[i] > 0)
 	    {
@@ -974,19 +931,11 @@ amonProcessingNfdump (char* line, long time)
     }
   else if (proto == UDP)
     {
-      // Is this a request or a reply?
-      if (isservice(flow.sport) && !isservice(flow.dport))
-	oci = -1*pkts;
-      // request
-      else if (isservice(flow.dport) && !isservice(flow.sport))
-	oci = 1*pkts;
-      // unknown combination, do nothing
-      else
-	oci = 0;
+      oci = pkts;
     }
   else
-    // unknown proto, do nothing
-    oci=0;
+    // unknown proto
+    oci = pkts;
   
   amonProcessing(flow, bytes, start, end, oci); 
 }
@@ -1017,9 +966,9 @@ void *reset_transmit (void* passed_parms)
   // a long time to be reported. Perhaps we had too specific
   // signature and we will never collect enough matches
   // Serialize access to stats
-  update_stats(c);
   if (training_done)
     detect_attack(c);
+  update_stats(c);
   std::cout.precision(5);
 
   cout<<std::fixed<<"Done "<<time(0)<<" curtime "<<curtime<<endl;
@@ -1308,7 +1257,7 @@ int main (int argc, char *argv[])
 		  }
 		// zero out stats
 		cell* c = &cells[crear];
-		memset(c->databrick_p, 0, BRICK_DIMENSION*sizeof(unsigned int));
+		memset(c->databrick_p, 0, BRICK_DIMENSION*sizeof(int));
 		memset(c->databrick_s, 0, BRICK_DIMENSION*sizeof(int));
 		memset(c->wfilter_p, 0, BRICK_DIMENSION*sizeof(unsigned int));
 		memset(c->wfilter_s, 0, BRICK_DIMENSION*sizeof(int));	  

@@ -138,7 +138,7 @@ int bettersig(flow_t a, flow_t b)
 // Use service port instead of the last byte
 int myhash(u_int32_t ip, unsigned short port, int way)
 {
-  // 1 - sip, 2 - dip, 3 - dpref /24, 4 - serv, 5 - cli
+  // 1 - foreign ip, 2 - local ip, 3 - local pref /24, 4 - foreign port, 5 - local port
   switch (way)
     {
       case FOR:
@@ -147,10 +147,10 @@ int myhash(u_int32_t ip, unsigned short port, int way)
 	return (ip % BRICK_UNIT) + BRICK_UNIT;
       case LOCPREF:
 	return ((ip & 0xffffff00) % BRICK_UNIT) + 2*BRICK_UNIT;
-      case SERV:
-	return (isservice(port) % BRICK_UNIT) + 3*BRICK_UNIT;
-      case CLI:
-	return (isservice(port) % BRICK_UNIT) + 4*BRICK_UNIT;
+      case FPORT:
+	return (port % BRICK_UNIT) + 3*BRICK_UNIT;
+      case LPORT:
+	return (port % BRICK_UNIT) + 4*BRICK_UNIT;
       default:
 	return 0;
     }
