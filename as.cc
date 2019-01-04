@@ -449,7 +449,6 @@ amonProcessing(flow_t flow, int len, double start, double end, int oci)
 		      is_filtered = true;
 		      c->wfilter_p[s_bucket] += len;
 		      c->wfilter_s[s_bucket] += oci;
-		      break;
 		    }
 		}
 	    }
@@ -463,7 +462,6 @@ amonProcessing(flow_t flow, int len, double start, double end, int oci)
 		      is_filtered = true;
 		      c->wfilter_p[d_bucket] += len;
 		      c->wfilter_s[d_bucket] += oci;
-		      break;
 		    }
 		}
 	    }
@@ -478,7 +476,6 @@ amonProcessing(flow_t flow, int len, double start, double end, int oci)
 		      is_filtered = true;
 		      c->wfilter_p[s_bucket] += len;
 		      c->wfilter_s[s_bucket] += oci;
-		      break;
 		    }
 		}
 	    }
@@ -493,7 +490,6 @@ amonProcessing(flow_t flow, int len, double start, double end, int oci)
 		      is_filtered = true;
 		      c->wfilter_p[d_bucket] += len;
 		      c->wfilter_s[d_bucket] += oci;
-		      break;
 		    }
 		}
 	    }
