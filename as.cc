@@ -411,6 +411,8 @@ bool shouldFilter(int bucket, flow_t flow)
   else
     return false;
 }
+long votedtime = 0;
+int votes = 0;
 
 // Main function, which processes each flow
 void
@@ -423,8 +425,26 @@ amonProcessing(flow_t flow, int len, double start, double end, int oci)
       return;
     }
   // Standardize time
-  if (start > curtime)
+  if (curtime == 0)
     curtime = start;
+  if (start > curtime)
+    {
+      if (votes == 0)
+	votedtime = (int)start;
+      if ((int)start == votedtime)
+	votes++;
+      else
+	votes--;
+      if (votes >= 5)
+	{
+	  curtime = start;
+	  votedtime = 0;
+	  votes = 0;
+	}
+    }
+
+  if (lasttime == 0)
+    lasttime = curtime;
 
   flow_p fp(start, end, len, oci, flow);
       
@@ -944,7 +964,7 @@ void *reset_transmit (void* passed_parms)
   // Serialize access to cells
   pthread_mutex_lock (&cells_lock);
 
-  lasttime = curtime;
+  //lasttime = curtime;
   // We will process this one now
   int current = cfront;
 
@@ -967,8 +987,7 @@ void *reset_transmit (void* passed_parms)
   update_stats(c);
   std::cout.precision(5);
 
-  cout<<std::fixed<<"Done "<<time(0)<<" curtime "<<curtime<<endl;
-  // Detect attack here
+    // Detect attack here
   pthread_exit (NULL);
 }
 
@@ -1240,9 +1259,12 @@ int main (int argc, char *argv[])
 		start = time(0);
 	      }
 	    processedflows++;
-	    if (processedflows == (int)parms["max_flows"])
+	    // Each second
+	    if (curtime - lasttime >= 1) //processedflows == (int)parms["max_flows"])
 	      {
 		pthread_mutex_lock (&cells_lock);
+		cout<<std::fixed<<"Done "<<time(0)<<" curtime "<<curtime<<" flows "<<processedflows<<endl;
+
 		// This one we will work on next
 		crear = (crear + 1)%QSIZE;
 		cout<<"Next cell at "<<crear<<endl;
@@ -1265,6 +1287,7 @@ int main (int argc, char *argv[])
 		pthread_create (&thread_id, NULL, reset_transmit, NULL);
 		pthread_detach(thread_id);
 		processedflows = 0;
+		lasttime = curtime;
 	      }
 	    amonProcessingNfdump(line, epoch); 
 	  }
