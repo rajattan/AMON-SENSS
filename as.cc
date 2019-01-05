@@ -695,7 +695,7 @@ void findBestSignature(int i, cell* c)
       if (empty(samples.bins[i].flows[s].flow))
 	continue;
 
-      double candrate = (double)samples.bins[i].flows[s].oci/parms["attack_low"];
+      double candrate = (double)samples.bins[i].flows[s].oci;
 
       if (!compliantsig(i, samples.bins[i].flows[s].flow))
 	{
