@@ -56,7 +56,8 @@ class Signature:
 
 
     def printsig(self):
-        return self.time , " rate " , self.rate, " oci ", self.oci, " src ip ", self.src, " and src port ", self.sport, " and dst ip ", self.dst, " and dst port ", self.dport, " and proto ", self.proto
+        rate = self.rate*8/1000000000.0
+        return self.time , " rate " , rate, "Gbps oci ", self.oci, " src ip ", self.src, " and src port ", self.sport, " and dst ip ", self.dst, " and dst port ", self.dport, " and proto ", self.proto
 
 def insertSignature(sig):
     siglist = signatures

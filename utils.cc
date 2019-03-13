@@ -198,16 +198,13 @@ void loadprefixes(const char* fname)
       *ptr=0;
       int mask = atoi(ptr+1);
       u_int32_t dpref = todec(pref);
-      cout<<" Pref "<<dpref<<" mask "<<mask<<" line "<<pref<<endl;
       if (mask <= 24)
 	{
 	  // how many /24 are there?
 	  int count = 1 << (24 - mask);
-	  cout<<" /24x "<<count<<endl;
 	  for (int i = 0; i < count; i++)
 	    {
 	      localprefs24.insert(dpref);
-	      cout<<"Inserted "<<dpref<<endl;
 	      dpref += 256;
 	    }
 	}
@@ -215,7 +212,6 @@ void loadprefixes(const char* fname)
 	{
 	  // how many /30 are there"
 	  int count = 1 << (30 - mask);
-	  cout<<" / 30s "<<count<<endl;
 	  for (int i = 0; i < count; i++)
 	    {
 	      localprefs30.insert(dpref);
@@ -223,7 +219,6 @@ void loadprefixes(const char* fname)
 	    }
 	}
     }
-  cout<<"THere are "<<localprefs24.size()<<" /24s and "<<localprefs30.size()<<" IPs\n";
 }
 
 // Is this a local prefix?

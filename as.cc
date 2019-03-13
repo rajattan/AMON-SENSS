@@ -103,8 +103,6 @@ struct cell
 bool noorphan = false;
 // How many service ports are there
 int numservices = 0;
-// How many local prefixes are there
-int numprefs = 0;
 // Save all flows for a given time slot
 map<long, time_flow*> timeflows;
 
@@ -659,7 +657,7 @@ void update_stats(cell* c)
   trained++;
   if (trained == parms["min_train"])
     {
-      cout<<"Current becomes historical "<<endl;
+      //cout<<"Current becomes historical "<<endl;
       if (!training_done)
 	{
 	  training_done = true;
@@ -741,10 +739,16 @@ void findBestSignature(int i, cell* c)
       double diff = curtime - lasttime;
       if (diff == 0)
 	diff = 1;
-      int rate = c->databrick_p[i]/diff;
-      int roci = c->databrick_s[i]/diff;
+      double avgv = stats[hist][avg][vol][i];
+      double stdv = sqrt(stats[hist][ss][vol][i]/(stats[hist][n][vol][i]-1));
+      double avgs = stats[hist][avg][sym][i];
+      double stds = sqrt(stats[hist][ss][sym][i]/(stats[hist][n][sym][i]-1));
+      int rate = c->databrick_p[i]/diff - avgv - parms["num_std"]*stdv;
+      int roci = c->databrick_s[i]/diff - avgs - parms["num_std"]*stds;
       // Write the start of the attack into alerts
       ofstream out;
+      
+
       out.open("alerts.txt", std::ios_base::app);
       out<<i/BRICK_UNIT<<" "<<(long)curtime<<" ";
       out<<"START "<<i<<" "<<rate;
@@ -1072,9 +1076,7 @@ int main (int argc, char *argv[])
   // Load service port numbers
   noorphan = (bool) parms["no_orphan"];
   numservices = loadservices("services.txt");
-  cout<<"Services "<<numservices<<endl;
   loadprefixes("localprefs.txt");
-  cout<<"Num prefs "<<numprefs<<endl;
   
   char c, buf[32];
   char *file_in = NULL;
@@ -1267,7 +1269,6 @@ int main (int argc, char *argv[])
 
 		// This one we will work on next
 		crear = (crear + 1)%QSIZE;
-		cout<<"Next cell at "<<crear<<endl;
 		if (crear == cfront && !cempty)
 		  {
 		    perror("QSIZE is too small\n");
