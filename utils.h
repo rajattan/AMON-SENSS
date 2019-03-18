@@ -38,7 +38,7 @@ enum ways{FOR, LOC, LOCPREF, FPORT, LPORT};
 #define REPORT_THRESH 30
 #define MIN_FRESH 10              // have seen most of their records
 #define HMB 1.1                   // This is how much more a less specific signature should catch to be accepted
-#define MAXLINE 255               // Maximum length for reading strings
+#define MAXLINE 1024              // Maximum length for reading strings
 #define AR_LEN 30                 // How many delimiters may be in an array
 #define MAX_DIFF 10               // How close should a timestamp be to the one where attack is detected
 #define NF 16                     // Number of different signatures for a flow
@@ -51,6 +51,9 @@ enum ways{FOR, LOC, LOCPREF, FPORT, LPORT};
 #define ALPHA 0.5                 // Constant for weighted average of filtering effectiveness
 #define EFF_THRESH 0.5            // If we're dropping less than this much traffic, we need a better signature
 enum protos {TCP=6, UDP=17};      // Transport protocols we work with. We ignore other traffic
+
+
+
 
 class DataBuf : public streambuf
 {

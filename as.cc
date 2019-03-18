@@ -34,6 +34,8 @@
 #include <netinet/in_systm.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
+#include <netinet/tcp.h>
+#include <netinet/udp.h>
 #include <netinet/ip6.h>
 #include <net/ethernet.h>
 #include <sys/time.h>
@@ -49,7 +51,7 @@
 #include <string>
 #include <map>
 #include <cmath>
-
+#include <pcap.h>
 #include <dirent.h>
 
 // MySQL includes
@@ -93,8 +95,8 @@ void parse(char* input, char delimiter, int** array)
 // Variables/structs needed for detection
 struct cell
 {
-  int databrick_p[BRICK_DIMENSION];	         // databrick volume
-  int databrick_s[BRICK_DIMENSION];	         // databrick symmetry 
+  long int databrick_p[BRICK_DIMENSION];	 // databrick volume
+  long int databrick_s[BRICK_DIMENSION];         // databrick symmetry 
   unsigned int wfilter_p[BRICK_DIMENSION];	 // volume w filter 
   int wfilter_s[BRICK_DIMENSION];	         // symmetry w filter 
   int fresh;
@@ -145,13 +147,17 @@ double lasttime = 0;
 // Verbose bit
 int verbose = 0;
 
-long firsttime = 0;       // Beginning of trace 
+double firsttime = 0;       // Beginning of trace 
 long freshtime = 0;       // Where we last ended when processing data 
-long firsttimeinfile = 0; // First time in the current file 
+double firsttimeinfile = 0; // First time in the current file 
 long updatetime = 0;      // Time of last stats update
 long statstime = 0;       // Time when we move the stats to history 
 char filename[MAXLINE];   // A string to hold filenames
 struct timespec last_entry;
+
+// Is this pcap file or flow file? Default is flow
+bool is_pcap = false;
+bool is_live = false;
 
 // Serialize access to statistics
 pthread_mutex_t cells_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -657,7 +663,6 @@ void update_stats(cell* c)
   trained++;
   if (trained == parms["min_train"])
     {
-      //cout<<"Current becomes historical "<<endl;
       if (!training_done)
 	{
 	  training_done = true;
@@ -737,14 +742,14 @@ void findBestSignature(int i, cell* c)
 	  signatures[i].oci = 0;
 	}
       double diff = curtime - lasttime;
-      if (diff == 0)
+      if (diff < 1)
 	diff = 1;
       double avgv = stats[hist][avg][vol][i];
       double stdv = sqrt(stats[hist][ss][vol][i]/(stats[hist][n][vol][i]-1));
       double avgs = stats[hist][avg][sym][i];
       double stds = sqrt(stats[hist][ss][sym][i]/(stats[hist][n][sym][i]-1));
-      int rate = c->databrick_p[i]/diff - avgv - parms["num_std"]*stdv;
-      int roci = c->databrick_s[i]/diff - avgs - parms["num_std"]*stds;
+      long int rate = c->databrick_p[i]/diff - avgv - parms["num_std"]*stdv;
+      long int roci = c->databrick_s[i]/diff - avgs - parms["num_std"]*stds;
       // Write the start of the attack into alerts
       ofstream out;
       
@@ -779,8 +784,8 @@ void findBestSignature(int i, cell* c)
 // This function detects an attack
 void detect_attack(cell* c)
 {
-  // If verbose, output debugging statistics into files
-  if (verbose)
+  // If verbose, output debugging statistics into DB
+  if (false) // Jelena verbose
     {
       sql::PreparedStatement *stmt;
       DataBuf buffer((char*)c, sizeof(cell));
@@ -884,9 +889,60 @@ void detect_attack(cell* c)
     }
 }
 
+// Read pcap packet format
+void
+amonProcessingPcap (pcap_pkthdr* hdr, u_char* p, double time)
+{
+  // Start and end time of a flow are just pkt time
+  double start = time;
+  double end = time;
+  double dur = 1;
+  int pkts, bytes;
+
+  struct ip ip;
+  // Get source and destination IP and port and protocol 
+  flow_t flow;
+
+  struct ether_header ehdr;
+  memcpy (&ehdr, p, sizeof (struct ether_header));
+  int eth_type = ntohs (ehdr.ether_type);
+  if (eth_type == 0x0800)
+    {
+      memcpy (&ip, p + sizeof (ehdr),sizeof (struct ip));   
+      flow.src = ntohl (ip.ip_src.s_addr);
+      flow.dst = ntohl (ip.ip_dst.s_addr);
+      int proto = ip.ip_p;
+      if (proto == IPPROTO_TCP)
+	{
+	  struct tcphdr *tcp = (struct tcphdr*)(p + sizeof (ehdr) + ip.ip_hl*4);
+	  flow.sport = ntohs(tcp->th_sport);
+	  flow.dport = ntohs(tcp->th_dport);
+	}
+      else if (proto == IPPROTO_UDP)
+	{
+	  struct udphdr *udp = (struct udphdr*)(p + sizeof (ehdr) + ip.ip_hl*4);
+	  flow.sport = ntohs(udp->uh_sport);
+	  flow.dport = ntohs(udp->uh_dport);
+	}
+      else
+	{
+	  flow.sport = 0;
+	  flow.dport = 0;
+	}
+      pkts = 1;
+      bytes = ntohs(ip.ip_len);
+      flow.slocal = islocal(flow.src);
+      flow.dlocal = islocal(flow.dst);
+      flow.proto = proto;
+      int oci = 1;
+      amonProcessing(flow, bytes, start, end, oci); 
+    }
+}
+
+
 // Read nfdump flow format
 void
-amonProcessingNfdump (char* line, long time)
+amonProcessingNfdump (char* line, double time)
 {
   /* 2|1453485557|768|1453485557|768|6|0|0|0|2379511808|44694|0|0|0|2792759296|995|0|0|0|0|2|0|1|40 */
   // Get start and end time of a flow
@@ -905,7 +961,6 @@ amonProcessingNfdump (char* line, long time)
     dur = 3600;
   int pkts, bytes;
 
-  // JMM: 100 s up to here
   // Get source and destination IP and port and protocol 
   flow_t flow;
   int proto = atoi(line+delimiters[4]);
@@ -914,12 +969,10 @@ amonProcessingNfdump (char* line, long time)
   flow.dst = strtol(line+delimiters[13], &tokene, 10);
   flow.dport = atoi(line+delimiters[14]); 
   flow.proto = proto;
-  // JMM 100 s up to here
   flow.slocal = islocal(flow.src);
   flow.dlocal = islocal(flow.dst);
   bytes = atoi(line+delimiters[22]);
   processedbytes+=bytes;
-  // JMM: 115 s up to here
 
   // Cross-traffic, do nothing
   if (!flow.slocal && !flow.dlocal)
@@ -968,7 +1021,7 @@ void *reset_transmit (void* passed_parms)
   // Serialize access to cells
   pthread_mutex_lock (&cells_lock);
 
-  //lasttime = curtime;
+  lasttime = curtime;
   // We will process this one now
   int current = cfront;
 
@@ -1183,6 +1236,8 @@ int main (int argc, char *argv[])
 	  i++;
 	}
       inputs.clear();
+
+      tracefiles.push_back(file_in);
       
       std::sort(tracefiles.begin(), tracefiles.end(), sortbyFilename());
 
@@ -1199,33 +1254,60 @@ int main (int argc, char *argv[])
 
 	if (!started && startfile && strstr(file,startfile) == NULL)
 	  {
-	    cout<<"No match "<<startfile<<" "<<file<<endl;
 	    continue;
 	  }
 
 	started = 1;
 	
 	char cmd[MAXLINE];
-	// Try to reada s netflow file
-	sprintf(cmd,"nfdump -r %s -o pipe 2>/dev/null", file);
+
+	// Try to read from an interface as pcap
+	sprintf(cmd,"tcpdump -i %s 2>/dev/null", file);
 	nf = popen(cmd, "r");
 	// Close immediately so we get the error code 
-	// and we can detect if this is maybe flow-tools format 
+	// and we can detect if this is not an interface
 	int error = pclose(nf);
-	if (error == 64000)
+	if (error > 0)
 	  {
-	    sprintf(cmd,"ft2nfdump -r %s | nfdump -r - -o pipe", file);
+	    // Try to read as pcap file
+	    sprintf(cmd,"tcpdump -r %s 2>/dev/null", file);
 	    nf = popen(cmd, "r");
+	    // Close immediately so we get the error code 
+	    // and we can detect if this is maybe netflow or flow-tools format 
+	    int error = pclose(nf);
+	    if (error > 0)
+	      {
+		// Try to read as netflow file
+		sprintf(cmd,"nfdump -r %s -o pipe 2>/dev/null", file);
+		nf = popen(cmd, "r");
+		// Close immediately so we get the error code 
+		// and we can detect if this is maybe flow-tools format 
+		int error = pclose(nf);
+		if (error == 64000)
+		  {
+		    sprintf(cmd,"ft2nfdump -r %s | nfdump -r - -o pipe", file);
+		    nf = popen(cmd, "r");
+		  }
+		else
+		  {
+		    nf = popen(cmd, "r");
+		  }
+	      }
+	    else
+	      {
+		is_pcap = true;
+	      }
+	    if (!nf && !is_pcap)
+	      {
+		fprintf(stderr,"Cannot open file %s for reading. Unknown format.\n", file);
+		pclose(nf);
+		exit(1);
+	      }
 	  }
 	else
 	  {
-	    nf = popen(cmd, "r");
-	  }
-	if (!nf)
-	  {
-	    fprintf(stderr,"Cannot open file %s for reading. Unknown format.\n", file);
-	    pclose(nf);
-	    exit(1);
+	    is_live = true;
+	    is_pcap = true;
 	  }
 
 	// Now read from file
@@ -1233,64 +1315,137 @@ int main (int argc, char *argv[])
 	cout<<"Reading from "<<file<<endl;
 	firsttimeinfile = 0;
 
-	while (fgets(line, MAXLINE, nf) != NULL)
+	if (!is_pcap)
 	  {
-	    // Check that this is the line with a flow
-	    char tmpline[255];
-	    strcpy(tmpline, line);
-	    if (strstr(tmpline, "|") == NULL)
-	      continue;
-	    strtok(tmpline,"|");
-	    strtok(NULL,"|");
-	    strtok(NULL,"|");
-	    char* tokene;
-	    char* token = strtok(NULL, "|");
-	    long epoch = strtol(token, &tokene, 10);
-	    token = strtok(NULL, "|");
-	    int msec = atoi(token);
-	    if (num_pkts == 0)
-		firsttime = epoch;
-	    num_pkts++;
-	    if (firsttimeinfile == 0)
-	      firsttimeinfile = epoch;
-	    allflows++;
-	    if (allflows % 1000000 == 0)
+	    while (fgets(line, MAXLINE, nf) != NULL)
 	      {
-		double diff = time(0) - start;
-		cout<<"Processed "<<allflows<<", 1M in "<<diff<<endl;
-		start = time(0);
-	      }
-	    processedflows++;
-	    // Each second
-	    if (curtime - lasttime >= 1) //processedflows == (int)parms["max_flows"])
-	      {
-		pthread_mutex_lock (&cells_lock);
-		cout<<std::fixed<<"Done "<<time(0)<<" curtime "<<curtime<<" flows "<<processedflows<<endl;
-
-		// This one we will work on next
-		crear = (crear + 1)%QSIZE;
-		if (crear == cfront && !cempty)
+		// Check that this is the line with a flow
+		char tmpline[255];
+		strcpy(tmpline, line);
+		if (strstr(tmpline, "|") == NULL)
+		  continue;
+		strtok(tmpline,"|");
+		strtok(NULL,"|");
+		strtok(NULL,"|");
+		char* tokene;
+		char* token = strtok(NULL, "|");
+		double epoch = strtol(token, &tokene, 10);
+		token = strtok(NULL, "|");
+		int usec = atoi(token);
+		epoch = epoch + usec/1000000.0;
+		if (num_pkts == 0)
+		  firsttime = epoch;
+		num_pkts++;
+		if (firsttimeinfile == 0)
+		  firsttimeinfile = epoch;
+		allflows++;
+		if (allflows % 1000000 == 0)
 		  {
-		    perror("QSIZE is too small\n");
-		    exit(1);
+		    double diff = time(0) - start;
+		    cout<<"Processed "<<allflows<<", 1M in "<<diff<<endl;
+		    start = time(0);
 		  }
-		// zero out stats
-		cell* c = &cells[crear];
-		memset(c->databrick_p, 0, BRICK_DIMENSION*sizeof(int));
-		memset(c->databrick_s, 0, BRICK_DIMENSION*sizeof(int));
-		memset(c->wfilter_p, 0, BRICK_DIMENSION*sizeof(unsigned int));
-		memset(c->wfilter_s, 0, BRICK_DIMENSION*sizeof(int));	  
-		// and it will soon be full
-		cempty = false;
-		pthread_mutex_unlock (&cells_lock);
-		
-		pthread_t thread_id;
-		pthread_create (&thread_id, NULL, reset_transmit, NULL);
-		pthread_detach(thread_id);
-		processedflows = 0;
-		lasttime = curtime;
+		processedflows++;
+		// Each second
+		if (curtime - lasttime >= 1) //processedflows == (int)parms["max_flows"])
+		  {
+		    pthread_mutex_lock (&cells_lock);
+		    cout<<std::fixed<<"Done "<<time(0)<<" curtime "<<curtime<<" flows "<<processedflows<<endl;
+		    
+		    // This one we will work on next
+		    crear = (crear + 1)%QSIZE;
+		    if (crear == cfront && !cempty)
+		      {
+			perror("QSIZE is too small\n");
+			exit(1);
+		      }
+		    // zero out stats
+		    cell* c = &cells[crear];
+		    memset(c->databrick_p, 0, BRICK_DIMENSION*sizeof(int));
+		    memset(c->databrick_s, 0, BRICK_DIMENSION*sizeof(int));
+		    memset(c->wfilter_p, 0, BRICK_DIMENSION*sizeof(unsigned int));
+		    memset(c->wfilter_s, 0, BRICK_DIMENSION*sizeof(int));	  
+		    // and it will soon be full
+		    cempty = false;
+		    pthread_mutex_unlock (&cells_lock);
+		    
+		    pthread_t thread_id;
+		    pthread_create (&thread_id, NULL, reset_transmit, NULL);
+		    pthread_detach(thread_id);
+		    processedflows = 0;
+		    lasttime = curtime;
+		  }
+		amonProcessingNfdump(line, epoch); 
 	      }
-	    amonProcessingNfdump(line, epoch); 
+	  }
+	else
+	  {
+	    char ebuf[MAXLINE];
+	    pcap_t *pt;
+	    if (is_live)
+	      pt = pcap_open_live(file, BUFSIZ, 1, 1000, ebuf);
+	    else
+	      pt = pcap_open_offline (file, ebuf);
+	    u_char* p;
+	    struct pcap_pkthdr *h;
+	    if (pt)
+	      {
+		while (true)
+		  {
+		    int rc = pcap_next_ex(pt, &h, (const u_char **) &p);
+		    if (rc <= 0)
+		      break;
+		    struct ether_header* eth_header = (struct ether_header *) p;
+    
+		    if (ntohs(eth_header->ether_type) != ETHERTYPE_IP) 
+		      continue;
+		    double epoch = h->ts.tv_sec + h->ts.tv_usec/1000000.0;
+
+		    if (num_pkts == 0)
+		      firsttime = epoch;
+		    num_pkts++;
+		    if (firsttimeinfile == 0)
+		      firsttimeinfile = epoch;
+		    allflows++;
+		    if (allflows % 1000000 == 0)
+		      {
+			double diff = time(0) - start;
+			cout<<"Processed "<<allflows<<", 1M in "<<diff<<endl;
+			start = time(0);
+		      }
+		    processedflows++;
+		    // Each second
+		    if (curtime - lasttime >= 1) //processedflows == (int)parms["max_flows"])
+		      {
+			pthread_mutex_lock (&cells_lock);
+			cout<<std::fixed<<"Done "<<time(0)<<" curtime "<<curtime<<" flows "<<processedflows<<endl;
+		    
+			// This one we will work on next
+			crear = (crear + 1)%QSIZE;
+			if (crear == cfront && !cempty)
+			  {
+			    perror("QSIZE is too small\n");
+			    exit(1);
+			  }
+			// zero out stats
+			cell* c = &cells[crear];
+			memset(c->databrick_p, 0, BRICK_DIMENSION*sizeof(int));
+			memset(c->databrick_s, 0, BRICK_DIMENSION*sizeof(int));
+			memset(c->wfilter_p, 0, BRICK_DIMENSION*sizeof(unsigned int));
+			memset(c->wfilter_s, 0, BRICK_DIMENSION*sizeof(int));	  
+			// and it will soon be full
+			cempty = false;
+			pthread_mutex_unlock (&cells_lock);
+			
+			pthread_t thread_id;
+			pthread_create (&thread_id, NULL, reset_transmit, NULL);
+			pthread_detach(thread_id);
+			processedflows = 0;
+			lasttime = curtime;
+		      }
+		    amonProcessingPcap(h, p, epoch); 
+		  }
+	      }
 	  }
 	cout<<"Done with the file "<<file<<" time "<<time(0)<<endl;
 	pclose(nf);

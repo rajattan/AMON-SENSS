@@ -100,7 +100,7 @@ string printsignature(flow_t s)
 	out += " and ";
       if (s.proto == TCP)
 	out += "proto tcp";
-      else
+      else if (s.proto == UDP)
 	out += "proto udp";
     }
   return out;

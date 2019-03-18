@@ -5,9 +5,14 @@
 # it deletes it and sends a more useful signature.
 import time, sys, os
 
-signatures = []
+targets = dict()
 limit = 0
 
+class Target:
+    def __init__(self, ip):
+        self.ip = ip
+        self.signatures = []
+        
 class Signature:
     
     def __init__(self, line):
@@ -20,7 +25,7 @@ class Signature:
         self.rate = 0
         ar = line.split()
         self.time = int(ar[1])
-        self.rate = int(ar[4])
+        self.rate = int(ar[4])*8/1000000000.0;
         self.oci = int(ar[5])
         for delim in ("src ip", "src port", "dst ip", "dst port", "proto"):
             i = line.find(delim)
@@ -56,34 +61,28 @@ class Signature:
 
 
     def printsig(self):
-        rate = self.rate*8/1000000000.0
-        return self.time , " rate " , rate, "Gbps oci ", self.oci, " src ip ", self.src, " and src port ", self.sport, " and dst ip ", self.dst, " and dst port ", self.dport, " and proto ", self.proto
+        return self.time , " rate " , self.rate, "Gbps oci ", self.oci, " src ip ", self.src, " and src port ", self.sport, " and dst ip ", self.dst, " and dst port ", self.dport, " and proto ", self.proto
 
 def insertSignature(sig):
-    siglist = signatures
+    if (sig.dst not in targets.keys()):
+        targets[sig.dst] = Target(sig.dst)
+    siglist = targets[sig.dst].signatures
     for s in siglist:
         if (sig == s):
+            if (sig.rate > s.rate):
+                s.rate = sig.rate
             return
         if (sig.contains(s)):
-            signatures.remove(s)
-            return
-            #decide which is better 
-            #if sig
-            #  delete s
-            #  insert sig if not there already
-            #else return
+            targets[sig.dst].signatures.remove(s)
         elif(s.contains(sig)):
+            if (sig.rate > s.rate):
+                s.rate = sig.rate
             return
-            #decide which is better 
-            #if sig
-            #  delete s
-            #  insert sig if not there already
-            #else return
         else:
             pass    
     # We came here because this sig is like none other
     # insert it
-    signatures.append(sig)
+    targets[sig.dst].signatures.append(sig)
         
 # Continuously read from the alert file
 def follow(name):
@@ -114,13 +113,14 @@ def processalert(line):
     s = Signature(line)
     if (s.rate >= limit):
         insertSignature(s)
-    for ss in signatures:
-        print "Signature ",ss.printsig()
+    for t in targets:
+        for ss in targets[t].signatures:
+            print "Signature ",ss.printsig()
     print "\n\n\n\n\n\n";
         
 # Alert file is specified on the cmd line        
 if __name__ == '__main__':
     loglines = follow(sys.argv[1])
-    limit = int(sys.argv[2])
+    limit = float(sys.argv[2])
     for line in loglines:
         processalert(line)

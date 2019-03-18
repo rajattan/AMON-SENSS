@@ -17,6 +17,10 @@ AC_SEARCH_LIBS(pthread_create,pthread)
 AC_SEARCH_LIBS([get_driver_instance], [mysqlcppconn], [], [
   AC_MSG_ERROR([unable to find the get_driver_instance() function])
 ])
+AC_SEARCH_LIBS([pcap_open_offline], [pcap], [], [
+  AC_MSG_ERROR([unable to find libpcap])
+])
+
 #AC_LIB_LINKFLAGS([mysqlcppconn])	
 # Checks for header files.
 AC_CHECK_HEADERS(cppconn/driver.h [arpa/inet.h fcntl.h locale.h netdb.h netinet/in.h stdint.h string.h sys/socket.h sys/time.h unistd.h])
