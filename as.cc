@@ -76,11 +76,12 @@ int* delimiters;
 // Something like strtok but it doesn't create new
 // strings. Instead it replaces delimiters with 0
 // in the original string
-void parse(char* input, char delimiter, int** array)
+int parse(char* input, char delimiter, int** array)
 {
   int pos = 0;
   memset(*array, 255, AR_LEN);
   int len = strlen(input);
+  int found = 0;
   for(int i = 0; i<len; i++)
     {
       if (input[i] == delimiter)
@@ -88,8 +89,10 @@ void parse(char* input, char delimiter, int** array)
 	  (*array)[pos] = i+1;
 	  input[i] = 0;
 	  pos++;
+	  found++;
 	}
     }
+  return found;
 }
 
 // Variables/structs needed for detection
@@ -940,6 +943,63 @@ amonProcessingPcap (pcap_pkthdr* hdr, u_char* p, double time)
 }
 
 
+// Read Flowride flow format
+void
+amonProcessingFlowride(char* line, double start)
+{
+  /* 1561501151614779410     UDP     ACTIVE  x       129.82.138.39   192.55.83.30    14597   13568   4       313     1561501153614905585 */
+  // Line is already parsed
+  char send[MAXLINE], rend[MAXLINE];
+  strncpy(send, line+delimiters[9],10);
+  send[10] = 0;
+  strncpy(rend, line+delimiters[9]+10,9);
+  rend[9] = 0;
+  double end = (double)atoi(send) + (double)atoi(rend)/1000000000;
+  double dur = end - start;
+  // Normalize duration
+  if (dur < 0)
+    dur = 0;
+  if (dur > 3600)
+    dur = 3600;
+  int pkts, bytes;
+
+  // Get source and destination IP and port and protocol 
+  flow_t flow;
+  int proto;
+  if (strcmp(line+delimiters[4], "UDP") == 0)
+    proto = UDP;
+  else if (strcmp(line+delimiters[4], "TCP") == 0)
+    proto = TCP;
+  else
+    proto = 0;
+
+  flow.src = todec(line+delimiters[3]);
+  flow.sport = atoi(line+delimiters[5]); 
+  flow.dst = todec(line+delimiters[4]);
+  flow.dport = atoi(line+delimiters[6]); 
+  flow.proto = proto;
+  flow.slocal = islocal(flow.src);
+  flow.dlocal = islocal(flow.dst);
+  bytes = atoi(line+delimiters[8]);
+  processedbytes+=bytes;
+
+  // Cross-traffic, do nothing
+  if (!flow.slocal && !flow.dlocal)
+    {
+      nl++;
+      return;
+    }
+  l++;
+  //int flags = atoi(line+delimiters[19]); return the flags part later
+  pkts = atoi(line+delimiters[7]);
+  pkts = (int)(pkts/(dur+1))+1;
+  bytes = (int)(bytes/(dur+1))+1;
+
+  int oci = pkts;
+  
+  amonProcessing(flow, bytes, start, end, oci); 
+}
+
 // Read nfdump flow format
 void
 amonProcessingNfdump (char* line, double time)
@@ -1109,7 +1169,7 @@ printHelp (void)
 {
   printf ("amon-senss\n(C) 2018 University of Southern California.\n\n");
   printf ("-h                             Print this help\n");
-  printf ("-r <inputfile or inputfolder>  Input is in nfdump or flow-tools file(s)\n");
+  printf ("-r <inputfile or inputfolder>  Input is in given file or folder, supports and self-detects nfdump, flow-tools, pcap and flowride formats\n");
   printf ("-l                             Load historical data from as.dump\n");
   printf ("-s                             Start from this given file in the input folder\n");
   printf ("-e                             End with this given file in the input folder\n");
@@ -1190,7 +1250,7 @@ int main (int argc, char *argv[])
   clock_gettime(CLOCK_MONOTONIC, &last_entry);      
   // This is going to be a pointer to input
   // stream, either from nfdump or flow-tools */
-  FILE* nf;
+  FILE* nf, * ft;
   unsigned long long num_pkts = 0;      
 
   // Read flows from a file
@@ -1282,15 +1342,90 @@ int main (int argc, char *argv[])
 		nf = popen(cmd, "r");
 		// Close immediately so we get the error code 
 		// and we can detect if this is maybe flow-tools format 
-		int error = pclose(nf);
-		if (error == 64000)
+		int error1 = pclose(nf);
+		sprintf(cmd,"ft2nfdump -r %s -c 1 2>/dev/null", file);
+		ft = popen(cmd, "r");
+		int error2 = pclose(ft);
+		if (error1 == 64000 && error2 == 0)
 		  {
 		    sprintf(cmd,"ft2nfdump -r %s | nfdump -r - -o pipe", file);
 		    nf = popen(cmd, "r");
+		    
 		  }
-		else
+		else if (error1 < 64000)
 		  {
 		    nf = popen(cmd, "r");
+		  }
+		// could be Flowride
+		else
+		  {
+		    // This could be Flowride file
+		    // Add magic check here
+		    char line[MAXLINE];
+		    FILE* pFile = fopen (file, "r");
+
+		    if (pFile)
+		      {
+			while (true)
+			  {
+			    char* rc = fgets(line, MAXLINE-1, pFile);
+			    if (rc == 0)
+			      break;
+			    
+			    int dl = parse(line,'\t', &delimiters);
+			    if (dl != 10)
+			      continue;
+			    char sstart[MAXLINE], rstart[MAXLINE];
+			    strncpy(sstart, line,10);
+			    sstart[10] = 0;
+			    strncpy(rstart, line+10,9);
+			    rstart[9] = 0;
+			    double epoch = (double)atoi(sstart)+(double)atoi(rstart)/1000000000;
+			    if (num_pkts == 0)
+			      firsttime = epoch;
+			    num_pkts++;
+			    if (firsttimeinfile == 0)
+			      firsttimeinfile = epoch;
+			    allflows++;
+			    if (allflows % 1000000 == 0)
+			      {
+				double diff = time(0) - start;
+				cout<<"Processed "<<allflows<<", 1M in "<<diff<<endl;
+				start = time(0);
+			      }
+			    processedflows++;
+			    // Each second
+			    if (curtime - lasttime >= 1) 
+			      {
+				pthread_mutex_lock (&cells_lock);
+				cout<<std::fixed<<"Done "<<time(0)<<" curtime "<<curtime<<" flows "<<processedflows<<endl;
+		    
+				// This one we will work on next
+				crear = (crear + 1)%QSIZE;
+				if (crear == cfront && !cempty)
+				  {
+				    perror("QSIZE is too small\n");
+				    exit(1);
+				  }
+				// zero out stats
+				cell* c = &cells[crear];
+				memset(c->databrick_p, 0, BRICK_DIMENSION*sizeof(int));
+				memset(c->databrick_s, 0, BRICK_DIMENSION*sizeof(int));
+				memset(c->wfilter_p, 0, BRICK_DIMENSION*sizeof(unsigned int));
+				memset(c->wfilter_s, 0, BRICK_DIMENSION*sizeof(int));	  
+				// and it will soon be full
+				cempty = false;
+				pthread_mutex_unlock (&cells_lock);
+				
+				pthread_t thread_id;
+				pthread_create (&thread_id, NULL, reset_transmit, NULL);
+				pthread_detach(thread_id);
+				processedflows = 0;
+				lasttime = curtime;
+			      }
+			    amonProcessingFlowride(line, epoch);
+			  }
+		      }
 		  }
 	      }
 	    else
@@ -1390,6 +1525,7 @@ int main (int argc, char *argv[])
 	    struct pcap_pkthdr *h;
 	    if (pt)
 	      {
+		// This is a pcap file
 		while (true)
 		  {
 		    int rc = pcap_next_ex(pt, &h, (const u_char **) &p);
