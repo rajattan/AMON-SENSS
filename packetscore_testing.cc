@@ -48,14 +48,17 @@ map<unsigned int, map<int, float> > dstPortMap;            // <timestamp, dst po
 multimap<unsigned int, unsigned int> constraintMap;
 map<unsigned int, double> traffic_at_Ti;
 map<unsigned int, double> q_map;
-double qmin;
-double qmax;
-float omega=0.1;
+double qmin=56000000000;
+double qmax=101000000000;
+float omega=0.05;
+float fnplusone=1.0;
+float fmin=1.0;
 
 map<int, float> flowProfile;                // <range of bypes, profile>
 map<int, float> protocolProfile;            // <protocol, profile>
 map<unsigned int, float> dstIPProfile;      // <dst ip (prefix), profile>
 map<int, float> dstPortProfile;             // <dst port, profile>
+map<unsigned int, float> phi;
 
 
 
@@ -364,10 +367,6 @@ void readSize(unsigned int ts, float bps, int d){
     }
 
         traffic_at_Ti[ts] = traffic_at_Ti[ts]+bps;
-        /*if(qmax < traffic_at_Ti[ts])
-           qmax = traffic_at_Ti[ts];
-        if(traffic_at_Ti[ts] < qmin)
-           qmin = traffic_at_Ti[ts];*/        
 
         flowMap[ts][x]++;
         ts=ts+30;
@@ -385,9 +384,34 @@ void updateQ()
                q_map[key] = j->second;
            }
 
- 	    q_map[key_plus] = 0.9*q_map[key] + 0.1*j->second;
+ 	    q_map[key_plus] = (1.0-omega)*q_map[key] + omega*j->second;
 
-            if(q_map[key_plus] > 	    
+            if(q_map[key] >= qmax)
+            {
+              fnplusone = fmin;
+            }
+            else if(q_map[key] <= qmin)
+            {
+              fnplusone = 1;
+            }
+            else
+            {
+              float v = (qmax - q_map[key])/(qmax - qmin);
+              if(v >= fmin)
+              {
+                fnplusone = v; 
+              }
+              else
+              {
+                fnplusone = fmin;
+              }
+            }
+            if(fnplusone < fmin)
+            {
+               fmin = fnplusone;
+
+ 	    }
+           phi[key_plus] = fnplusone;
         }
 }
 
